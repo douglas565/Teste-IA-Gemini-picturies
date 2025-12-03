@@ -79,18 +79,25 @@ const rgbToHsl = (r: number, g: number, b: number) => {
 };
 
 const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, height: number): VisualFeatures => {
-  const imageData = ctx.getImageData(0, 0, width, height);
+  // Amostragem Central: Analisa apenas o miolo (50%) da imagem para ignorar céu/fundo
+  const startX = Math.floor(width * 0.25);
+  const endX = Math.floor(width * 0.75);
+  const startY = Math.floor(height * 0.25);
+  const endY = Math.floor(height * 0.75);
+
+  const imageData = ctx.getImageData(startX, startY, endX - startX, endY - startY);
   const data = imageData.data;
   
   let rTotal = 0, gTotal = 0, bTotal = 0;
   let edges = 0;
-  const totalPixels = width * height;
   const step = 4; // Amostragem para performance
+  const cropWidth = endX - startX;
+  const cropHeight = endY - startY;
 
-  // Análise de Cor Média e Textura (Edge) em uma passada
-  for (let y = 0; y < height; y += step) {
-    for (let x = 0; x < width - 1; x += step) {
-      const i = (y * width + x) * 4;
+  // Análise de Cor Média e Textura (Edge) no crop central
+  for (let y = 0; y < cropHeight; y += step) {
+    for (let x = 0; x < cropWidth - 1; x += step) {
+      const i = (y * cropWidth + x) * 4;
       
       // Acumula Cor
       rTotal += data[i];
@@ -98,13 +105,13 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
       bTotal += data[i + 2];
 
       // Detecta Borda (Horizontal simples)
-      const nextI = (y * width + (x + 1)) * 4;
+      const nextI = (y * cropWidth + (x + 1)) * 4;
       const diff = Math.abs(data[i] - data[nextI]); // Diferença de brilho
       if (diff > 30) edges++;
     }
   }
 
-  const pixelCount = (width * height) / (step * step);
+  const pixelCount = (cropWidth * cropHeight) / (step * step);
   const avgR = rTotal / pixelCount;
   const avgG = gTotal / pixelCount;
   const avgB = bTotal / pixelCount;
@@ -113,10 +120,10 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   const [hue, saturation, lightness] = rgbToHsl(avgR, avgG, avgB);
 
   // Calcula Densidade de Borda
-  const edgeDensity = Math.min(1.0, (edges * step) / (width * height));
+  const edgeDensity = Math.min(1.0, (edges * step) / (cropWidth * cropHeight));
 
   return {
-    aspectRatio: width / height,
+    aspectRatio: width / height, // Aspect Ratio usa a imagem inteira
     edgeDensity: edgeDensity,
     hue: hue,
     saturation: saturation,
@@ -151,7 +158,27 @@ const applyOcrFilters = (ctx: CanvasRenderingContext2D, width: number, height: n
   ctx.putImageData(imageData, 0, 0);
 };
 
-const preprocessImage = async (base64Image: string): Promise<{ ocrImageUrl: string, features: VisualFeatures }> => {
+const createInvertedImage = (ctx: CanvasRenderingContext2D, width: number, height: number): string => {
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  
+  // Inverte cores (Negativo)
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = 255 - data[i];     // R
+    data[i + 1] = 255 - data[i + 1]; // G
+    data[i + 2] = 255 - data[i + 2]; // B
+  }
+  
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = width;
+  tempCanvas.height = height;
+  const tempCtx = tempCanvas.getContext('2d');
+  tempCtx?.putImageData(imageData, 0, 0);
+  
+  return tempCanvas.toDataURL('image/jpeg', 0.9);
+};
+
+const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string, invertedUrl: string, features: VisualFeatures }> => {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
@@ -159,7 +186,8 @@ const preprocessImage = async (base64Image: string): Promise<{ ocrImageUrl: stri
       const ctx = canvas.getContext('2d');
       if (!ctx) { 
         resolve({ 
-            ocrImageUrl: base64Image, 
+            normalUrl: base64Image, 
+            invertedUrl: base64Image,
             features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 } 
         }); 
         return; 
@@ -171,18 +199,22 @@ const preprocessImage = async (base64Image: string): Promise<{ ocrImageUrl: stri
       // 1. Desenha imagem original
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       
-      // 2. Extrai Features da imagem COLORIDA original
+      // 2. Extrai Features da imagem COLORIDA original (Central Crop)
       const features = extractVisualFeatures(ctx, canvas.width, canvas.height);
 
-      // 3. Aplica filtros para OCR (Modifica o canvas)
+      // 3. Aplica filtros para OCR (Modifica o canvas para Preto e Branco)
       applyOcrFilters(ctx, canvas.width, canvas.height);
+      const normalUrl = canvas.toDataURL('image/jpeg', 0.9);
 
-      // 4. Retorna a imagem filtrada para o Tesseract + Features originais
-      resolve({ ocrImageUrl: canvas.toDataURL('image/jpeg', 0.9), features });
+      // 4. Cria versão invertida (Dual-Pass para etiquetas metálicas)
+      const invertedUrl = createInvertedImage(ctx, canvas.width, canvas.height);
+
+      resolve({ normalUrl, invertedUrl, features });
     };
     
     img.onerror = () => resolve({ 
-        ocrImageUrl: base64Image, 
+        normalUrl: base64Image, 
+        invertedUrl: base64Image,
         features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 } 
     });
     
@@ -195,33 +227,31 @@ const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[
   let bestMatch: TrainingExample | null = null;
   
   // Limite super estrito para "Auto Match" (5% de diferença global)
-  // Isso impede que luminárias parecidas mas diferentes sejam tratadas como iguais
   let minDiff = 0.05; 
 
   for (const example of trainingData) {
     if (!example.features) continue;
     const ef = example.features;
 
-    // 1. Diferença de Aspect Ratio (Formato) - Peso Alto (40%)
-    // Normalizado para porcentagem
+    // 1. Diferença de Aspect Ratio (Formato) - PESO MÁXIMO (50%)
     const diffAR = Math.abs(current.aspectRatio - ef.aspectRatio) / Math.max(current.aspectRatio, ef.aspectRatio);
 
-    // 2. Diferença de Cor (Hue) - Peso Médio (30%)
-    // Hue é circular (0-360), a maior diferença possível é 180.
+    // 2. Diferença de Textura (Edge) - PESO ALTO (35%)
+    const diffED = Math.abs(current.edgeDensity - ef.edgeDensity);
+
+    // 3. Diferença de Cor (Hue) - PESO BAIXO (15%) - Reduzido para evitar ruído de luz do dia
     const hueDist = Math.min(Math.abs(current.hue - ef.hue), 360 - Math.abs(current.hue - ef.hue));
     const diffHue = hueDist / 180.0;
     
-    // Diferença de Saturação e Brilho (Auxiliares de Cor)
+    // Auxiliares de Cor
     const diffSat = Math.abs(current.saturation - ef.saturation);
     const diffBri = Math.abs(current.brightness - ef.brightness) / 255.0;
 
-    // 3. Diferença de Textura (Edge) - Peso Médio (30%)
-    const diffED = Math.abs(current.edgeDensity - ef.edgeDensity);
-
-    // Score Final Ponderado
-    // AR(0.4) + Color(0.3) + Texture(0.3)
-    const colorScore = (diffHue * 0.6) + (diffSat * 0.2) + (diffBri * 0.2); // Composição da cor
-    const totalDiff = (diffAR * 0.4) + (colorScore * 0.3) + (diffED * 0.3);
+    const colorScore = (diffHue * 0.6) + (diffSat * 0.2) + (diffBri * 0.2); 
+    
+    // Score Final Rebalanceado
+    // AR(0.50) + Texture(0.35) + Color(0.15)
+    const totalDiff = (diffAR * 0.50) + (diffED * 0.35) + (colorScore * 0.15);
 
     if (totalDiff < minDiff) {
       minDiff = totalDiff;
@@ -238,25 +268,24 @@ export const analyzeLuminaireImage = async (
   trainingData: TrainingExample[]
 ): Promise<AnalysisResponse> => {
   
-  // 1. Processamento Duplo: Extração Visual + Filtro OCR
-  const { ocrImageUrl, features } = await preprocessImage(base64Image);
+  // 1. Processamento: Extração Visual Central + Filtros OCR Dual-Pass
+  const { normalUrl, invertedUrl, features } = await preprocessImage(base64Image);
 
   // 2. MEMÓRIA VISUAL ESTRITA
   const visualMatch = findVisualMatch(features, trainingData);
   
-  // Só retorna match visual se for REALMENTE parecido (threshold < 0.05 no findVisualMatch)
   if (visualMatch) {
     return {
       model: visualMatch.model,
       calculatedPower: visualMatch.power,
       confidence: 0.98,
       rawText: "Visual Match (Identidade Confirmada)",
-      reasoning: "Reconhecimento Visual: Cor, Formato e Textura > 95% compatíveis.",
+      reasoning: "Reconhecimento Visual: Formato e Textura > 95% compatíveis.",
       features: features
     };
   }
 
-  // 3. OCR (Fallback ou Confirmação)
+  // 3. OCR Dual-Pass (Normal + Invertido)
   try {
     const worker = await Tesseract.createWorker('eng');
     await worker.setParameters({
@@ -264,11 +293,18 @@ export const analyzeLuminaireImage = async (
       tessedit_pageseg_mode: '6' as any,
     });
 
-    const ret = await worker.recognize(ocrImageUrl);
-    const text = ret.data.text;
+    // Pass 1: Imagem Normal
+    const resNormal = await worker.recognize(normalUrl);
+    
+    // Pass 2: Imagem Invertida (Para etiquetas metálicas)
+    const resInverted = await worker.recognize(invertedUrl);
+    
     await worker.terminate();
 
-    const result = processExtractedText(text, features, trainingData);
+    // Combina os textos para análise
+    const combinedText = `${resNormal.data.text} | ${resInverted.data.text}`;
+
+    const result = processExtractedText(combinedText, features, trainingData);
     result.features = features; 
     return result;
 
