@@ -59,7 +59,6 @@ const fuzzyContains = (text: string, target: string, tolerance: number = 2): boo
 
 // --- VISION ENGINE: CORES E FEATURES ---
 
-// Converte RGB para HSL (Matiz, Saturação, Luminosidade)
 const rgbToHsl = (r: number, g: number, b: number) => {
   r /= 255; g /= 255; b /= 255;
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
@@ -78,34 +77,167 @@ const rgbToHsl = (r: number, g: number, b: number) => {
   return [h * 360, s, l];
 };
 
-const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, height: number): VisualFeatures => {
-  // Amostragem Central: Analisa apenas o miolo (50%) da imagem para ignorar céu/fundo
-  const startX = Math.floor(width * 0.25);
-  const endX = Math.floor(width * 0.75);
-  const startY = Math.floor(height * 0.25);
-  const endY = Math.floor(height * 0.75);
+const isNotSkyPixel = (r: number, g: number, b: number) => {
+  const brightness = (r + g + b) / 3;
+  // Sky heuristic: Very bright OR blue-dominant
+  // Ajustado para ser menos agressivo em dias nublados
+  const isSky = brightness > 220 || (b > r + 20 && b > g + 20 && brightness > 160);
+  return !isSky;
+};
 
-  const imageData = ctx.getImageData(startX, startY, endX - startX, endY - startY);
+// Detecta objetos usando componentes conectados simplificado
+const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: number) => {
+  const visited = new Uint8Array(width * height); // 0 = unvisited
+  const blobs: {x: number, y: number, w: number, h: number, area: number}[] = [];
+  const scanStep = 4; // Performance optimization
+
+  const getIdx = (x: number, y: number) => y * width + x;
+
+  for (let y = 0; y < height; y += scanStep) {
+    for (let x = 0; x < width; x += scanStep) {
+      const idx = getIdx(x, y);
+      if (visited[idx]) continue;
+
+      const r = data[idx * 4];
+      const g = data[idx * 4 + 1];
+      const b = data[idx * 4 + 2];
+
+      if (isNotSkyPixel(r, g, b)) {
+        // Start Flood Fill
+        let minX = x, maxX = x, minY = y, maxY = y;
+        let count = 0;
+        const stack = [{x, y}];
+        visited[idx] = 1;
+
+        // Limit stack size/depth to prevent browser freeze on huge blobs
+        let loopSafety = 0;
+        const maxLoop = 100000; 
+
+        while (stack.length > 0 && loopSafety < maxLoop) {
+          loopSafety++;
+          const p = stack.pop()!;
+          count++;
+
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+
+          // Neighbors (Check coarse grid)
+          const neighbors = [
+            {nx: p.x + scanStep, ny: p.y},
+            {nx: p.x - scanStep, ny: p.y},
+            {nx: p.x, ny: p.y + scanStep},
+            {nx: p.x, ny: p.y - scanStep}
+          ];
+
+          for (const n of neighbors) {
+            if (n.nx >= 0 && n.nx < width && n.ny >= 0 && n.ny < height) {
+              const nIdx = getIdx(n.nx, n.ny);
+              if (visited[nIdx] === 0) {
+                 const nr = data[nIdx * 4];
+                 const ng = data[nIdx * 4 + 1];
+                 const nb = data[nIdx * 4 + 2];
+                 if (isNotSkyPixel(nr, ng, nb)) {
+                   visited[nIdx] = 1;
+                   stack.push({x: n.nx, y: n.ny});
+                 }
+              }
+            }
+          }
+        }
+        
+        blobs.push({
+          x: minX,
+          y: minY,
+          w: maxX - minX + scanStep,
+          h: maxY - minY + scanStep,
+          area: count // This is 'stepped' area unit
+        });
+      }
+    }
+  }
+
+  // FILTRO INTELIGENTE
+  const totalSteppedArea = (width * height) / (scanStep * scanStep);
+  const minArea = totalSteppedArea * 0.01; // 1% da imagem
+
+  const validBlobs = blobs.filter(b => {
+    // 1. Filtro de Área (Percentual)
+    if (b.area < minArea) return false;
+
+    const ar = b.w / b.h;
+
+    // 2. Filtro de Formato (Shape)
+    // Ignora "Muito Curto e Largo" (ex: fios)
+    if (ar > 3.0) return false; 
+    
+    // Ignora "Muito Alto e Fino" (ex: postes isolados)
+    if (ar < 0.2) return false;
+
+    return true;
+  });
+
+  if (validBlobs.length === 0) {
+    // Fallback: Centro da imagem
+    const cx = width / 2, cy = height / 2;
+    return { x: cx - width/4, y: cy - height/4, w: width/2, h: height/2 };
+  }
+
+  // Seleciona o maior blob válido
+  validBlobs.sort((a, b) => b.area - a.area);
+  const best = validBlobs[0];
+
+  const padding = 20;
+  return {
+    x: Math.max(0, best.x - padding),
+    y: Math.max(0, best.y - padding),
+    w: Math.min(width - best.x + padding * 2, best.w + padding * 2),
+    h: Math.min(height - best.y + padding * 2, best.h + padding * 2)
+  };
+};
+
+const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, height: number): VisualFeatures => {
+  const fullImageData = ctx.getImageData(0, 0, width, height);
+  
+  // 1. DETECT OBJECT BOUNDS (Filtros de Contorno)
+  const bounds = detectObjectBounds(fullImageData.data, width, height);
+  
+  // FILTRO DE ÁREA (Percentual da Imagem)
+  const imageArea = width * height;
+  const objectArea = bounds.w * bounds.h;
+  const coverageRatio = objectArea / imageArea;
+
+  // Se o objeto for muito pequeno (< 5%) ou ocupar a imagem toda (provavelmente erro),
+  // ajustamos os bounds para o centro para tentar ler algo, mas a feature será "ruim".
+  let finalBounds = bounds;
+  // Fallback suave
+  if (coverageRatio < 0.01) {
+     const cx = width / 2, cy = height / 2;
+     finalBounds = { x: cx - width/4, y: cy - height/4, w: width/2, h: height/2 };
+  }
+
+  // FILTRO DE FORMATO (Aspect Ratio)
+  const objectAR = finalBounds.w / finalBounds.h;
+  
+  // Extrai dados APENAS de dentro do Bounding Box detectado
+  const imageData = ctx.getImageData(finalBounds.x, finalBounds.y, finalBounds.w, finalBounds.h);
   const data = imageData.data;
   
   let rTotal = 0, gTotal = 0, bTotal = 0;
   let edges = 0;
-  const step = 2; // Passo menor para mais precisão na textura
-  const cropWidth = endX - startX;
-  const cropHeight = endY - startY;
+  const step = 2;
+  const cropWidth = finalBounds.w;
+  const cropHeight = finalBounds.h;
 
-  // Análise de Cor Média e Textura (Edge) no crop central
   for (let y = 0; y < cropHeight - 1; y += step) {
     for (let x = 0; x < cropWidth - 1; x += step) {
       const i = (y * cropWidth + x) * 4;
       
-      // Acumula Cor
       rTotal += data[i];
       gTotal += data[i + 1];
       bTotal += data[i + 2];
 
-      // Detecta Borda (Gradiente Horizontal e Vertical)
-      // Converte para escala de cinza para comparar brilho
       const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
       
       const iRight = (y * cropWidth + (x + 1)) * 4;
@@ -117,7 +249,6 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
       const diffH = Math.abs(gray - grayRight);
       const diffV = Math.abs(gray - grayDown);
 
-      // Threshold de borda ajustado para capturar detalhes da luminária
       if (diffH > 20 || diffV > 20) {
         edges++;
       }
@@ -129,14 +260,11 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   const avgG = gTotal / pixelCount;
   const avgB = bTotal / pixelCount;
 
-  // Calcula HSL
   const [hue, saturation, lightness] = rgbToHsl(avgR, avgG, avgB);
-
-  // Calcula Densidade de Borda Normalizada
   const edgeDensity = Math.min(1.0, (edges * step) / (cropWidth * cropHeight));
 
   return {
-    aspectRatio: width / height, // Aspect Ratio usa a imagem inteira
+    aspectRatio: objectAR, // Usa o AR do objeto detectado
     edgeDensity: edgeDensity,
     hue: hue,
     saturation: saturation,
@@ -144,25 +272,19 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   };
 };
 
-// Aplica filtros APENAS para o OCR (destrutivo para cores)
 const applyOcrFilters = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
   
-  // Contraste Extremo e Binarização Suave
   const contrast = 60; 
   const factor = (255 + contrast) / (255 * (255 - contrast));
 
   for (let i = 0; i < data.length; i += 4) {
-    // Grayscale
     const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-    
-    // Contraste
     let newValue = factor * (gray - 128) + 128;
     
-    // Thresholding suave para manter detalhes finos
-    if (newValue > 180) newValue = 255; // Limpa fundo branco
-    else if (newValue < 80) newValue = 0; // Reforça texto preto
+    if (newValue > 180) newValue = 255; 
+    else if (newValue < 80) newValue = 0; 
     
     data[i] = newValue;
     data[i + 1] = newValue;
@@ -175,11 +297,10 @@ const createInvertedImage = (ctx: CanvasRenderingContext2D, width: number, heigh
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
   
-  // Inverte cores (Negativo)
   for (let i = 0; i < data.length; i += 4) {
-    data[i] = 255 - data[i];     // R
-    data[i + 1] = 255 - data[i + 1]; // G
-    data[i + 2] = 255 - data[i + 2]; // B
+    data[i] = 255 - data[i];     
+    data[i + 1] = 255 - data[i + 1]; 
+    data[i + 2] = 255 - data[i + 2]; 
   }
   
   const tempCanvas = document.createElement('canvas');
@@ -209,17 +330,14 @@ const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string
       canvas.width = img.width * DETECT_CONFIG.SCALE_FACTOR;
       canvas.height = img.height * DETECT_CONFIG.SCALE_FACTOR;
       
-      // 1. Desenha imagem original
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       
-      // 2. Extrai Features da imagem COLORIDA original (Central Crop)
+      // Feature extraction agora usa detecção de objeto
       const features = extractVisualFeatures(ctx, canvas.width, canvas.height);
 
-      // 3. Aplica filtros para OCR (Modifica o canvas para Preto e Branco)
       applyOcrFilters(ctx, canvas.width, canvas.height);
       const normalUrl = canvas.toDataURL('image/jpeg', 0.9);
 
-      // 4. Cria versão invertida (Dual-Pass para etiquetas metálicas)
       const invertedUrl = createInvertedImage(ctx, canvas.width, canvas.height);
 
       resolve({ normalUrl, invertedUrl, features });
@@ -235,38 +353,25 @@ const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string
   });
 };
 
-// --- MATCHING VISUAL PONDERADO (CLASSIFY VISUAL) ---
 const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[]): TrainingExample | null => {
   let bestMatch: TrainingExample | null = null;
-  
-  // Limite estrito para "Auto Match"
   let minDiff = 0.05; 
 
   for (const example of trainingData) {
     if (!example.features) continue;
     const ef = example.features;
 
-    // 1. Diferença de Aspect Ratio (Formato) - PRIORIDADE MÁXIMA
-    // Luminárias diferentes costumam ter formatos diferentes (Quadrada vs Retangular vs Comprida)
+    // Comparação focada em Formato e Textura
     const diffAR = Math.abs(current.aspectRatio - ef.aspectRatio) / Math.max(current.aspectRatio, ef.aspectRatio);
-
-    // 2. Diferença de Textura (Edge Density) - PRIORIDADE ALTA
-    // Diferencia gradeada, lisa, com aletas, etc.
     const diffED = Math.abs(current.edgeDensity - ef.edgeDensity);
 
-    // 3. Diferença de Cor (Hue) - PRIORIDADE BAIXA
-    // Reduzida para evitar falsos negativos causados por iluminação do dia (céu azul vs nublado)
     const hueDist = Math.min(Math.abs(current.hue - ef.hue), 360 - Math.abs(current.hue - ef.hue));
     const diffHue = hueDist / 180.0;
-    
     const diffSat = Math.abs(current.saturation - ef.saturation);
     const diffBri = Math.abs(current.brightness - ef.brightness) / 255.0;
     const colorScore = (diffHue * 0.6) + (diffSat * 0.2) + (diffBri * 0.2); 
     
-    // SCORE FINAL REBALANCEADO
-    // Aspect Ratio: 60%
-    // Edge Density: 30%
-    // Color: 10%
+    // Pesos ajustados: AR (60%), ED (30%), Cor (10%)
     const totalDiff = (diffAR * 0.60) + (diffED * 0.30) + (colorScore * 0.10);
 
     if (totalDiff < minDiff) {
@@ -278,16 +383,14 @@ const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[
   return bestMatch;
 };
 
-// --- ANALISADOR PRINCIPAL ---
 export const analyzeLuminaireImage = async (
   base64Image: string,
   trainingData: TrainingExample[]
 ): Promise<AnalysisResponse> => {
   
-  // 1. Processamento: Extração Visual Central + Filtros OCR Dual-Pass
   const { normalUrl, invertedUrl, features } = await preprocessImage(base64Image);
 
-  // 2. MEMÓRIA VISUAL ESTRITA
+  // MEMÓRIA VISUAL
   const visualMatch = findVisualMatch(features, trainingData);
   
   if (visualMatch) {
@@ -295,13 +398,12 @@ export const analyzeLuminaireImage = async (
       model: visualMatch.model,
       calculatedPower: visualMatch.power,
       confidence: 0.98,
-      rawText: "Visual Match (Identidade Confirmada)",
-      reasoning: "Reconhecimento Visual: Formato e Textura > 95% compatíveis.",
+      rawText: "Visual Match (Objeto Confirmado)",
+      reasoning: "Reconhecimento Visual: Formato e Textura compatíveis com base de conhecimento.",
       features: features
     };
   }
 
-  // 3. OCR Dual-Pass (Normal + Invertido)
   try {
     const worker = await Tesseract.createWorker('eng');
     await worker.setParameters({
@@ -309,15 +411,10 @@ export const analyzeLuminaireImage = async (
       tessedit_pageseg_mode: '6' as any,
     });
 
-    // Pass 1: Imagem Normal
     const resNormal = await worker.recognize(normalUrl);
-    
-    // Pass 2: Imagem Invertida (Para etiquetas metálicas)
     const resInverted = await worker.recognize(invertedUrl);
-    
     await worker.terminate();
 
-    // Combina os textos para análise
     const combinedText = `${resNormal.data.text} | ${resInverted.data.text}`;
 
     const result = processExtractedText(combinedText, features, trainingData);
@@ -351,7 +448,6 @@ const processExtractedText = (
   let power: number | null = null;
   let reasoningParts: string[] = [`OCR: "${cleanText.substring(0, 30)}..."`];
 
-  // ESTRATÉGIA 2: TEXTO TREINADO
   const knownModels = new Set<string>();
   trainingData.forEach(t => knownModels.add(t.model));
   Object.keys(MODEL_VALID_POWERS).forEach(m => knownModels.add(m));
@@ -364,7 +460,6 @@ const processExtractedText = (
     }
   }
 
-  // ESTRATÉGIA 3: ASSINATURA EXATA
   if (!model) {
     for (const example of trainingData) {
       if (example.ocrSignature && cleanText.includes(example.ocrSignature)) {
@@ -376,13 +471,11 @@ const processExtractedText = (
     }
   }
 
-  // EXTRAÇÃO DE POTÊNCIA
   const numbers = cleanText.match(/\b\d+\b/g);
   let bestPowerMatch: number | null = null;
 
   if (numbers) {
     const candidates = numbers.map(n => parseInt(n, 10)).filter(val => {
-      // Filtra voltagens e anos comuns
       return ![110, 127, 220, 230, 240, 380, 2023, 2024, 2025].includes(val);
     });
 
@@ -390,7 +483,6 @@ const processExtractedText = (
       let candidatePower = val;
       let appliedRule = false;
 
-      // REGRA: 01 a 09 -> Multiplica por 10
       if (val >= 1 && val <= 9) {
         candidatePower = val * 10;
         appliedRule = true;
@@ -413,7 +505,6 @@ const processExtractedText = (
 
   if (bestPowerMatch) power = bestPowerMatch;
 
-  // CÁLCULO DE CONFIANÇA
   let confidence = 0.3;
   if (model && power) confidence = 1.0; 
   else if (model) confidence = 0.7;
