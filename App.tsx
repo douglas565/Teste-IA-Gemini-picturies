@@ -4,6 +4,160 @@ import { DetectionResult, TrainingExample } from './types';
 import ResultCard from './components/ResultCard';
 import CorrectionModal from './components/CorrectionModal';
 
+// --- DADOS DO CATÁLOGO DE REFERÊNCIA (PDF) ---
+const CATALOG_DATA = [
+  // VIÁRIAS
+  { 
+    model: 'SCHRÉDER VOLTANA', 
+    powers: [39, 56, 60, 75, 80, 110, 145, 212], 
+    color: 'bg-blue-800',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">SCH</div>
+  },
+  { 
+    model: 'SCHRÉDER AKILA', 
+    powers: [155, 236], 
+    color: 'bg-blue-800',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">AKL</div>
+  },
+  { 
+    model: 'BRIGHTLUX URBJET', 
+    powers: [40, 65, 130, 150, 213, 230], 
+    color: 'bg-cyan-700',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">BRT</div>
+  },
+  { 
+    model: 'ALPER IP BR', 
+    powers: [40, 130, 200, 210], 
+    color: 'bg-slate-700',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">ALP</div>
+  },
+  { 
+    model: 'REEME LD-3P', 
+    powers: [51, 65, 82, 130, 290], 
+    color: 'bg-gray-600',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">REE</div>
+  },
+  { 
+    model: 'LEDSTAR SL VITTA', 
+    powers: [58, 120, 200, 215], 
+    color: 'bg-indigo-600',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">LED</div>
+  },
+  { 
+    model: 'PHILIPS BRP372', 
+    powers: [127], 
+    color: 'bg-blue-900',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">PHI</div>
+  },
+  { 
+    model: 'IBILUX ÉVORA', 
+    powers: [120], 
+    color: 'bg-emerald-700',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">IBI</div>
+  },
+  { 
+    model: 'ILUMATIC ARES', 
+    powers: [60, 100], 
+    color: 'bg-red-800',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">ILU</div>
+  },
+  { 
+    model: 'ORION CRONOS/NENA', 
+    powers: [57, 100], 
+    color: 'bg-orange-700',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">ORI</div>
+  },
+  { 
+    model: 'ALUDAX AL10LM', 
+    powers: [60], 
+    color: 'bg-teal-700',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">ALU</div>
+  },
+  { 
+    model: 'GOLDEN SQUARE', 
+    powers: [75, 80], 
+    color: 'bg-yellow-600',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">GLD</div>
+  },
+  { 
+    model: 'ARGOS AR7', 
+    powers: [30, 62, 120], 
+    color: 'bg-purple-700',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">ARG</div>
+  },
+  { 
+    model: 'ARCOBRAS ECOLED', 
+    powers: [66, 120], 
+    color: 'bg-green-800',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">ARC</div>
+  },
+  { 
+    model: 'UNILUMIN LEDOLPHIN', 
+    powers: [120], 
+    color: 'bg-sky-600',
+    category: 'VIÁRIA',
+    icon: <div className="text-white font-bold text-xs">UNI</div>
+  },
+  // PROJETORES
+  { 
+    model: 'EMPALUX RL', 
+    powers: [100, 150], 
+    color: 'bg-zinc-800',
+    category: 'PROJETOR',
+    icon: <div className="text-white font-bold text-xs">EMP</div>
+  },
+  { 
+    model: 'ALPER LIPBR', 
+    powers: [90, 130, 200], 
+    color: 'bg-slate-700',
+    category: 'PROJETOR',
+    icon: <div className="text-white font-bold text-xs">ALP</div>
+  },
+  // DECORATIVAS
+  { 
+    model: 'TECNOWATT BORA/MERAK', 
+    powers: [54, 60], 
+    color: 'bg-pink-800',
+    category: 'DECORATIVA',
+    icon: <div className="text-white font-bold text-xs">TEC</div>
+  },
+  { 
+    model: 'SCHRÉDER ISLA', 
+    powers: [36, 51], 
+    color: 'bg-blue-800',
+    category: 'DECORATIVA',
+    icon: <div className="text-white font-bold text-xs">SCH</div>
+  },
+  { 
+    model: 'ORION VEGA', 
+    powers: [40, 55, 60], 
+    color: 'bg-orange-700',
+    category: 'DECORATIVA',
+    icon: <div className="text-white font-bold text-xs">ORI</div>
+  },
+  { 
+    model: 'SONERES FOSTERI', 
+    powers: [54], 
+    color: 'bg-lime-700',
+    category: 'DECORATIVA',
+    icon: <div className="text-white font-bold text-xs">SON</div>
+  },
+];
+
 const App: React.FC = () => {
   const [history, setHistory] = useState<DetectionResult[]>([]);
   const [trainingData, setTrainingData] = useState<TrainingExample[]>([]);
@@ -265,15 +419,46 @@ const App: React.FC = () => {
              ))}
           </div>
 
+          {/* CATÁLOGO E ESTADO VAZIO */}
           {history.length === 0 && !isWorking && (
-            <div className="text-center py-20 bg-white rounded-xl border border-dashed border-slate-300">
-               <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                 <svg className="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                 </svg>
+            <div className="space-y-12">
+               {/* Empty State */}
+               <div className="text-center py-10 bg-white rounded-xl border border-dashed border-slate-300">
+                  <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <svg className="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-slate-900 font-medium mb-1">Aguardando Imagens</h3>
+                  <p className="text-slate-500 text-sm max-w-xs mx-auto">Carregue centenas de imagens. O sistema aprende padrões automaticamente.</p>
                </div>
-               <h3 className="text-slate-900 font-medium mb-1">Aguardando Imagens</h3>
-               <p className="text-slate-500 text-sm max-w-xs mx-auto">Carregue centenas de imagens. O sistema aprende padrões automaticamente.</p>
+
+               {/* Catálogo */}
+               <div>
+                  <h3 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2 pl-2 border-l-4 border-indigo-500">
+                    Catálogo de Referência (PDF)
+                  </h3>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                    {CATALOG_DATA.map((item, idx) => (
+                      <div key={idx} className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm hover:shadow-md transition-shadow group">
+                         <div className={`h-24 ${item.color} bg-opacity-90 flex items-center justify-center relative`}>
+                            <div className="transform group-hover:scale-110 transition-transform duration-300 bg-white/20 p-2 rounded-lg backdrop-blur-sm">
+                               {item.icon}
+                            </div>
+                            <span className="absolute bottom-2 right-2 text-[10px] text-white/80 font-mono uppercase">{item.category}</span>
+                         </div>
+                         <div className="p-4">
+                            <h4 className="font-bold text-slate-900 text-sm md:text-base leading-tight mb-2">{item.model}</h4>
+                            <div className="flex flex-wrap gap-1">
+                              {item.powers.map(p => (
+                                <span key={p} className="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-mono border border-slate-200">{p}W</span>
+                              ))}
+                            </div>
+                         </div>
+                      </div>
+                    ))}
+                  </div>
+               </div>
             </div>
           )}
         </div>

@@ -3,14 +3,104 @@ import { AnalysisResponse, TrainingExample, VisualFeatures } from "../types";
 
 // --- TABELAS DE REFERÊNCIA (STRICT) ---
 const MODEL_VALID_POWERS: Record<string, number[]> = {
+  // Base Existente
   'PALLAS': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
   'KINGSUN': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
   'HBMI': [50, 75, 100, 150, 200],
   'ORI': [50], 
   'IESNA': [20, 40, 65, 85],
   'HTC': [22, 30, 40, 50, 60, 70, 80, 100, 120],
-  'BRIGHTLUX': [20, 30, 40, 50, 60, 100], 
-  'SANLIGHT': [20, 30, 40, 50, 60, 100]
+  'SANLIGHT': [20, 30, 40, 50, 60, 100],
+
+  // --- NOVOS DO PDF ---
+  
+  // SCHRÉDER
+  'SCHREDER': [36, 38, 39, 51, 56, 60, 75, 80, 110, 125, 145, 155, 212, 236],
+  'VOLTANA': [39, 56, 60, 75, 80, 110, 145, 212],
+  'AKILA': [155, 236],
+  'ISLA': [36, 51],
+  'STYLAGE': [38],
+  'RUBI': [60],
+  'GL2': [125],
+
+  // BRIGHTLUX
+  'BRIGHTLUX': [40, 50, 65, 130, 150, 213, 230],
+  'URBJET': [40, 65, 130, 150, 213, 230],
+  'ORI-0504': [50],
+
+  // ALPER
+  'ALPER': [35, 40, 60, 90, 100, 130, 200, 210],
+  'IP BR': [40, 130, 200, 210],
+  'LIPBR': [90, 130, 200],
+  'ALP': [60],
+  'LPT': [60],
+  'BR II': [130],
+
+  // REEME
+  'REEME': [51, 65, 82, 130, 290],
+  'LD-3P': [51, 65, 82, 130, 290],
+  'LD-7P': [65],
+
+  // LEDSTAR / UNICOBA
+  'LEDSTAR': [58, 61, 120, 200, 215],
+  'UNICOBA': [58, 61, 120, 200, 215],
+  'SL VITTA': [58, 120, 200, 215],
+  'FLEX': [61],
+
+  // PHILIPS
+  'PHILIPS': [58, 127],
+  'BRP372': [127],
+  'MICENAS': [58],
+
+  // IBILUX
+  'IBILUX': [120],
+  'EVORA': [120],
+
+  // ILUMATIC
+  'ILUMATIC': [60, 100],
+  'ARES': [60, 100],
+
+  // ORION
+  'ORION': [40, 55, 57, 58, 60, 100, 148, 150],
+  'VEGA': [40, 55, 60],
+  'CRONOS': [100],
+  'NENA': [57],
+
+  // ALUDAX
+  'ALUDAX': [60],
+
+  // GOLDEN
+  'GOLDEN': [65, 75, 80],
+  'SQUARE': [75, 80],
+
+  // ARGOS
+  'ARGOS': [30, 62, 120],
+
+  // UNILUMIN
+  'UNILUMIN': [35, 120],
+  'LEDOLPHIN': [120],
+  'OPERA': [35],
+
+  // ARCOBRAS
+  'ARCOBRAS': [66, 120],
+  'ECOLED': [120],
+  'ECO-STB': [66],
+
+  // EMPALUX
+  'EMPALUX': [100, 150],
+
+  // TECNOWATT
+  'TECNOWATT': [54, 60],
+  'MERAK': [54],
+  'BORA': [60],
+  'FO5': [60],
+
+  // SONERES
+  'SONERES': [54],
+  'FOSTERI': [54],
+  
+  // GENERICO
+  'BULBO': [35]
 };
 
 const DETECT_CONFIG = {
