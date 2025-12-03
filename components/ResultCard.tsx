@@ -22,8 +22,14 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, onEdit }) => {
       
       <div className="flex p-4 gap-4">
         {/* Image Thumbnail */}
-        <div className="w-24 h-24 flex-shrink-0 bg-gray-100 rounded-lg overflow-hidden border border-gray-100">
+        <div className="w-24 h-24 flex-shrink-0 bg-gray-100 rounded-lg overflow-hidden border border-gray-100 relative group">
           <img src={item.imageUrl} alt="Luminaire" className="w-full h-full object-cover" />
+          {item.features && (
+            <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center text-[8px] text-white transition-opacity">
+              <span>AR: {item.features.aspectRatio.toFixed(2)}</span>
+              <span>ED: {item.features.edgeDensity.toFixed(2)}</span>
+            </div>
+          )}
         </div>
 
         {/* Content */}

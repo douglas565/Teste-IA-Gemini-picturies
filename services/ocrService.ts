@@ -1,19 +1,19 @@
 import Tesseract from 'tesseract.js';
-import { AnalysisResponse, TrainingExample } from "../types";
+import { AnalysisResponse, TrainingExample, VisualFeatures } from "../types";
 
 // --- TABELAS DE REFERÊNCIA (STRICT) ---
 const MODEL_VALID_POWERS: Record<string, number[]> = {
   'PALLAS': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
   'KINGSUN': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
   'HBMI': [50, 75, 100, 150, 200],
-  'ORI': [50],
+  'ORI': [50], // Mantido na tabela para validação, mas filtrado na busca fuzzy se for curto
   'IESNA': [20, 40, 65, 85],
   'HTC': [22, 30, 40, 50, 60, 70, 80, 100, 120],
   'BRIGHTLUX': [20, 30, 40, 50, 60, 100], 
   'SANLIGHT': [20, 30, 40, 50, 60, 100]
 };
 
-// --- VISUAL FINGERPRINTS (Para classificação sem OCR) ---
+// --- VISUAL FINGERPRINTS (Para classificação fallback) ---
 const VISUAL_FINGERPRINTS: Record<string, { ar: [number, number], ed: [number, number] }> = {
   'PALLAS': { ar: [1.2, 2.5], ed: [0.10, 0.40] },
   'KINGSUN': { ar: [0.8, 1.3], ed: [0.30, 0.60] },
@@ -26,7 +26,6 @@ const DETECT_CONFIG = {
 };
 
 // --- UTILS: FUZZY MATCHING (LEVENSHTEIN) ---
-// Calcula a distância entre duas strings (quantas trocas de letras são necessárias)
 const levenshteinDistance = (a: string, b: string): number => {
   const matrix = [];
   for (let i = 0; i <= b.length; i++) matrix[i] = [i];
@@ -47,33 +46,27 @@ const levenshteinDistance = (a: string, b: string): number => {
   return matrix[b.length][a.length];
 };
 
-// Verifica se uma palavra alvo (ou algo parecido) existe no texto
 const fuzzyContains = (text: string, target: string, tolerance: number = 2): boolean => {
+  // CRITICAL FIX: Ignora targets muito curtos para evitar falsos positivos como "ORI" em ruído
+  if (target.length < 4) return false;
+
   const words = text.split(/\s+/);
   const targetUpper = target.toUpperCase();
   
-  // Verifica palavra por palavra
   for (const word of words) {
     if (Math.abs(word.length - targetUpper.length) > tolerance) continue;
     const dist = levenshteinDistance(word, targetUpper);
     if (dist <= tolerance) return true;
   }
   
-  // Verifica frases (sliding window) se o target tiver espaços
   if (targetUpper.includes(' ')) {
-      // Implementação simplificada para frases: verifica se o texto contem algo similar
-      // Para performance, verificamos substring exata primeiro
       if (text.includes(targetUpper)) return true;
   }
   
   return false;
 };
 
-// Interface para resultados visuais
-interface VisualFeatures {
-  aspectRatio: number;
-  edgeDensity: number;
-}
+// --- FUNÇÕES VISUAIS ---
 
 const calculateEdgeDensity = (data: Uint8ClampedArray, width: number, height: number): number => {
   let edges = 0;
@@ -92,38 +85,6 @@ const calculateEdgeDensity = (data: Uint8ClampedArray, width: number, height: nu
   return Math.min(1.0, (edges * (step * step)) / totalPixels);
 };
 
-const classifyVisual = (features: VisualFeatures): { model: string | null, confidence: number } => {
-  let bestModel = null;
-  let bestScore = 0;
-
-  for (const [model, fingerprint] of Object.entries(VISUAL_FINGERPRINTS)) {
-    let score = 0;
-    const [minAR, maxAR] = fingerprint.ar;
-    if (features.aspectRatio >= minAR && features.aspectRatio <= maxAR) {
-      const center = (minAR + maxAR) / 2;
-      const dist = Math.abs(features.aspectRatio - center);
-      const range = (maxAR - minAR) / 2;
-      score += 0.45 * Math.max(0.5, 1 - (dist / range));
-    }
-
-    const [minED, maxED] = fingerprint.ed;
-    if (features.edgeDensity >= minED && features.edgeDensity <= maxED) {
-      const center = (minED + maxED) / 2;
-      const dist = Math.abs(features.edgeDensity - center);
-      const range = (maxED - minED) / 2;
-      score += 0.40 * Math.max(0.5, 1 - (dist / range));
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestModel = model;
-    }
-  }
-
-  if (bestScore > 0.5) return { model: bestModel, confidence: bestScore };
-  return { model: null, confidence: 0 };
-};
-
 const enhanceImage = (ctx: CanvasRenderingContext2D, width: number, height: number): VisualFeatures => {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
@@ -135,7 +96,6 @@ const enhanceImage = (ctx: CanvasRenderingContext2D, width: number, height: numb
   for (let i = 0; i < data.length; i += 4) {
     const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
     let newValue = factor * (gray - 128) + 128;
-    // Binarização suave para não perder detalhes finos
     if (newValue > 160) newValue = 255;
     else if (newValue < 90) newValue = 0; 
     
@@ -173,16 +133,57 @@ const preprocessImage = async (base64Image: string): Promise<{ imgUrl: string, f
   });
 };
 
+// --- MATCHING VISUAL (A "Memória Fotográfica") ---
+const findVisualMatch = (currentFeatures: VisualFeatures, trainingData: TrainingExample[]): TrainingExample | null => {
+  let bestMatch: TrainingExample | null = null;
+  // Distância máxima para considerar "igual" (ajustado empiricamente)
+  // AR costuma variar entre 0.5 e 3.0. ED entre 0.0 e 1.0.
+  let minDistance = 0.15; 
+
+  for (const example of trainingData) {
+    if (!example.features) continue;
+
+    const dAR = Math.abs(currentFeatures.aspectRatio - example.features.aspectRatio);
+    const dED = Math.abs(currentFeatures.edgeDensity - example.features.edgeDensity);
+    
+    // Distância Euclidiana simples
+    const distance = Math.sqrt(dAR*dAR + dED*dED);
+
+    if (distance < minDistance) {
+      minDistance = distance;
+      bestMatch = example;
+    }
+  }
+
+  return bestMatch;
+};
+
+// --- ANALISADOR PRINCIPAL ---
 export const analyzeLuminaireImage = async (
   base64Image: string,
   trainingData: TrainingExample[]
 ): Promise<AnalysisResponse> => {
-  let worker;
-  try {
-    const { imgUrl: processedImage, features } = await preprocessImage(base64Image);
+  
+  // 1. Pré-processamento e Extração de Features Visuais
+  const { imgUrl: processedImage, features } = await preprocessImage(base64Image);
 
-    worker = await Tesseract.createWorker('eng');
-    // Adicionei caracteres comuns de erro para ajudar no regex depois
+  // 2. TENTATIVA 1: MEMÓRIA VISUAL (Super Rápido e Preciso para Lotes Repetidos)
+  // Se a imagem é visualmente idêntica a uma treinada, usa a resposta treinada.
+  const visualMatch = findVisualMatch(features, trainingData);
+  if (visualMatch) {
+    return {
+      model: visualMatch.model,
+      calculatedPower: visualMatch.power,
+      confidence: 0.99, // Confiança quase total na memória visual
+      rawText: "Visual Match",
+      reasoning: "Reconhecimento Visual: Identificado por similaridade de imagem com item treinado.",
+      features: features
+    };
+  }
+
+  // 3. OCR (Se não reconheceu visualmente)
+  try {
+    const worker = await Tesseract.createWorker('eng');
     await worker.setParameters({
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:',
       tessedit_pageseg_mode: '6' as any,
@@ -192,7 +193,9 @@ export const analyzeLuminaireImage = async (
     const text = ret.data.text;
     await worker.terminate();
 
-    return processExtractedText(text, features, trainingData);
+    const result = processExtractedText(text, features, trainingData);
+    result.features = features; // Anexa features para salvar depois
+    return result;
 
   } catch (error) {
     console.error(error);
@@ -201,7 +204,8 @@ export const analyzeLuminaireImage = async (
       rawText: "Erro de Leitura",
       calculatedPower: null,
       confidence: 0,
-      reasoning: "Falha OCR"
+      reasoning: "Falha OCR",
+      features: features
     };
   }
 };
@@ -211,7 +215,6 @@ const processExtractedText = (
   visualFeatures: VisualFeatures, 
   trainingData: TrainingExample[]
 ): AnalysisResponse => {
-  // Limpeza: remove quebras de linha e caracteres inúteis, mantém números e letras
   const cleanText = text.toUpperCase()
     .replace(/[^A-Z0-9\-\. \/:]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -221,61 +224,36 @@ const processExtractedText = (
   let power: number | null = null;
   let reasoningParts: string[] = [`OCR: "${cleanText}"`];
 
-  // =========================================================================
-  // ESTRATÉGIA 1: APRENDIZADO GENERALISTA (Dynamic Concept Matching)
-  // Verifica se o texto contem nomes de modelos que o usuário JÁ ENSINOU
-  // =========================================================================
-  
-  // Extrai lista única de modelos conhecidos (User Training + Built-in)
+  // ESTRATÉGIA 2: TEXTO TREINADO (Conceitual)
   const knownModels = new Set<string>();
   trainingData.forEach(t => knownModels.add(t.model));
   Object.keys(MODEL_VALID_POWERS).forEach(m => knownModels.add(m));
 
   for (const knownModel of knownModels) {
-    // Usa busca Fuzzy (tolerante a erros OCR)
-    // Ex: Se knownModel="PALLAS" e texto="PA11AS", dá match.
     if (fuzzyContains(cleanText, knownModel, 2)) {
       model = knownModel;
-      reasoningParts.push(`Identificado por padrão aprendido: ${model}`);
+      reasoningParts.push(`Padrão de Texto: ${model}`);
       break;
     }
   }
 
-  // =========================================================================
-  // ESTRATÉGIA 2: MEMÓRIA EXATA (Fallback)
-  // =========================================================================
+  // ESTRATÉGIA 3: MEMÓRIA DE ASSINATURA EXATA (Fallback)
   if (!model) {
     for (const example of trainingData) {
       if (example.ocrSignature && cleanText.includes(example.ocrSignature)) {
         model = example.model;
-        if (!power) power = example.power; // Só usa potência da memória se não achar no texto
-        reasoningParts.push(`Memória exata`);
+        if (!power) power = example.power;
+        reasoningParts.push(`Assinatura OCR Exata`);
         break;
       }
     }
   }
 
-  // =========================================================================
-  // ESTRATÉGIA 3: CLASSIFICAÇÃO VISUAL (Último recurso para Modelo)
-  // =========================================================================
-  if (!model) {
-    const visualResult = classifyVisual(visualFeatures);
-    if (visualResult.model && visualResult.confidence > 0.6) {
-      model = visualResult.model;
-      reasoningParts.push(`Visual (AR:${visualFeatures.aspectRatio.toFixed(1)})`);
-    }
-  }
-
-  // =========================================================================
-  // EXTRAÇÃO INTELIGENTE DE POTÊNCIA (Regra x10 Prioritária)
-  // =========================================================================
-  
-  // Extrai todos os números isolados
+  // EXTRAÇÃO DE POTÊNCIA
   const numbers = cleanText.match(/\b\d+\b/g);
   let bestPowerMatch: number | null = null;
 
   if (numbers) {
-    // Filtra anos e voltagens óbvios
     const candidates = numbers.map(n => parseInt(n, 10)).filter(val => {
       return ![110, 127, 220, 230, 240, 380, 2023, 2024, 2025].includes(val);
     });
@@ -284,23 +262,20 @@ const processExtractedText = (
       let candidatePower = val;
       let appliedRule = false;
 
-      // REGRA DE OURO: 01 a 09 -> Multiplica por 10
+      // REGRA: 01 a 09 -> Multiplica por 10
       if (val >= 1 && val <= 9) {
         candidatePower = val * 10;
         appliedRule = true;
       }
 
-      // Se temos um modelo, valida contra a tabela dele
       if (model && MODEL_VALID_POWERS[model]) {
         if (MODEL_VALID_POWERS[model].includes(candidatePower)) {
           bestPowerMatch = candidatePower;
-          reasoningParts.push(appliedRule ? `Regra (x10) aplicada: ${val}->${candidatePower}W` : `Potência encontrada: ${candidatePower}W`);
-          break; // Achamos uma potência válida para o modelo!
+          reasoningParts.push(appliedRule ? `Regra (x10): ${val}->${candidatePower}W` : `Potência: ${candidatePower}W`);
+          break;
         }
       } 
-      // Se não temos modelo (ou tabela), aceita valores sensatos (10 a 400)
       else if (candidatePower >= 10 && candidatePower <= 400) {
-        // Prioriza o maior valor razoável encontrado (geralmente potência é destaque)
         if (!bestPowerMatch || candidatePower > bestPowerMatch) {
             bestPowerMatch = candidatePower;
         }
@@ -308,27 +283,13 @@ const processExtractedText = (
     }
   }
 
-  // Se achamos via OCR/Regra, sobrescreve qualquer memória antiga
-  if (bestPowerMatch) {
-    power = bestPowerMatch;
-  }
+  if (bestPowerMatch) power = bestPowerMatch;
 
-  // =========================================================================
-  // CONCLUSÃO E CONFIANÇA
-  // =========================================================================
+  // CÁLCULO DE CONFIANÇA
   let confidence = 0.3;
-
-  if (model && power) {
-    // Se modelo e potência foram encontrados e validados
-    confidence = 1.0; 
-  } else if (model) {
-    // Só modelo
-    confidence = 0.6;
-    reasoningParts.push("Potência não confirmada.");
-  } else if (power) {
-    // Só potência
-    confidence = 0.5;
-  }
+  if (model && power) confidence = 1.0; 
+  else if (model) confidence = 0.6;
+  else if (power) confidence = 0.5;
 
   return {
     model: model,

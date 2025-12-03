@@ -1,3 +1,8 @@
+export interface VisualFeatures {
+  aspectRatio: number;
+  edgeDensity: number;
+}
+
 export interface DetectionResult {
   id: string;
   timestamp: number;
@@ -6,24 +11,26 @@ export interface DetectionResult {
   power: number | null;
   confidence: number;
   reasoning: string;
-  rawText?: string; // O que o OCR leu de verdade
+  rawText?: string;
+  features?: VisualFeatures; // Memória visual da imagem
   status: 'confirmed' | 'pending_review' | 'auto_detected';
 }
 
 export interface TrainingExample {
   model: string;
   power: number;
-  ocrSignature?: string; // O padrão de texto "errado" que identifica este modelo
+  ocrSignature?: string;
+  features?: VisualFeatures; // Memória visual treinada
   visualDescription?: string;
 }
 
-// Response structure for the internal OCR service
 export interface AnalysisResponse {
   model: string | null;
   rawText: string;
   calculatedPower: number | null;
   confidence: number;
   reasoning: string;
+  features?: VisualFeatures;
 }
 
 export interface GeminiResponse {

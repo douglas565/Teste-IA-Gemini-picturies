@@ -19,7 +19,7 @@ const App: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const CONFIDENCE_THRESHOLD = 0.85; // Aumentei para garantir qualidade automática
+  const CONFIDENCE_THRESHOLD = 0.85;
 
   // --- PERSISTÊNCIA ---
   useEffect(() => {
@@ -71,7 +71,7 @@ const App: React.FC = () => {
         const base64String = reader.result as string;
         const base64Data = base64String.split(',')[1];
 
-        // Passamos o trainingData atualizado para que ele use as novas regras imediatamente
+        // O analyzeLuminaireImage agora verifica a memória visual primeiro!
         const analysisResponse = await analyzeLuminaireImage(base64Data, trainingData);
 
         const isLowConfidence = analysisResponse.confidence < CONFIDENCE_THRESHOLD;
@@ -86,6 +86,7 @@ const App: React.FC = () => {
           confidence: analysisResponse.confidence,
           reasoning: analysisResponse.reasoning,
           rawText: analysisResponse.rawText,
+          features: analysisResponse.features, // Guarda features para aprendizado futuro
           status: (isLowConfidence || isMissingData) ? 'pending_review' : 'auto_detected'
         };
 
@@ -114,6 +115,8 @@ const App: React.FC = () => {
   const saveCorrection = (id: string, correctedModel: string, correctedPower: number) => {
     const originalItem = history.find(h => h.id === id);
     const errorSignature = originalItem?.rawText || "";
+    // CRUCIAL: Captura as features visuais da imagem original
+    const visualFeatures = originalItem?.features; 
 
     // 1. Atualizar histórico visual
     setHistory(prev => prev.map(item => {
@@ -130,20 +133,17 @@ const App: React.FC = () => {
       return item;
     }));
 
-    // 2. APRENDIZADO INTELIGENTE (Generalização)
-    // Adicionamos uma nova regra. O 'analyzeLuminaireImage' agora usa Fuzzy Match
-    // então basta adicionar o modelo à base de conhecimento.
+    // 2. APRENDIZADO INTELIGENTE (Visual + Texto)
     const newExample: TrainingExample = {
       model: correctedModel.toUpperCase(),
       power: correctedPower,
-      ocrSignature: errorSignature // Guarda o erro para caso o Fuzzy falhe
+      ocrSignature: errorSignature,
+      features: visualFeatures // Salva a "cara" da luminária para reconhecimento visual futuro
     };
     
     setTrainingData(prev => {
-       // Mantemos todas as regras anteriores para aumentar a "bolsa de palavras" conhecida
-       // mas evitamos duplicatas exatas de assinatura
-       const unique = prev.filter(p => p.ocrSignature !== newExample.ocrSignature);
-       return [...unique, newExample];
+       // Mantemos a base crescendo para melhorar a precisão
+       return [...prev, newExample];
     });
 
     setIsModalOpen(false);
@@ -206,7 +206,7 @@ const App: React.FC = () => {
            <div className="bg-white rounded-2xl shadow-lg border border-indigo-50 p-6 md:p-8 text-center relative overflow-hidden">
               <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Reconhecimento em Massa</h2>
               <p className="text-slate-500 mb-8 max-w-xl mx-auto relative z-10 text-sm md:text-base">
-                O sistema aprende com suas correções. Carregue uma pasta inteira.
+                O sistema aprende visualmente. Carregue uma pasta inteira de luminárias.
               </p>
 
               <div className="flex justify-center relative z-10">
