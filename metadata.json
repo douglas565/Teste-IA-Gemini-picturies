@@ -1,0 +1,5 @@
+{
+  "name": "LumiScan AI",
+  "description": "Intelligent luminaire recognition system with self-learning capabilities. Detects model and power based on label rules using Gemini Vision.",
+  "requestFramePermissions": []
+}
