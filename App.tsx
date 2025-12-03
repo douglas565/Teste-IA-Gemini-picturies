@@ -115,7 +115,7 @@ const App: React.FC = () => {
   const saveCorrection = (id: string, correctedModel: string, correctedPower: number) => {
     const originalItem = history.find(h => h.id === id);
     const errorSignature = originalItem?.rawText || "";
-    // CRUCIAL: Captura as features visuais da imagem original
+    // CRUCIAL: Captura as features visuais (incluindo cor e brilho)
     const visualFeatures = originalItem?.features; 
 
     // 1. Atualizar histórico visual

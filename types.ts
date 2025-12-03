@@ -1,6 +1,9 @@
 export interface VisualFeatures {
   aspectRatio: number;
   edgeDensity: number;
+  hue: number;        // 0-360 (Matiz da cor predominante)
+  saturation: number; // 0-1 (Intensidade da cor)
+  brightness: number; // 0-255 (Claridade média)
 }
 
 export interface DetectionResult {

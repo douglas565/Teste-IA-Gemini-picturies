@@ -6,26 +6,18 @@ const MODEL_VALID_POWERS: Record<string, number[]> = {
   'PALLAS': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
   'KINGSUN': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
   'HBMI': [50, 75, 100, 150, 200],
-  'ORI': [50], // Mantido na tabela para validação, mas filtrado na busca fuzzy se for curto
+  'ORI': [50], 
   'IESNA': [20, 40, 65, 85],
   'HTC': [22, 30, 40, 50, 60, 70, 80, 100, 120],
   'BRIGHTLUX': [20, 30, 40, 50, 60, 100], 
   'SANLIGHT': [20, 30, 40, 50, 60, 100]
 };
 
-// --- VISUAL FINGERPRINTS (Para classificação fallback) ---
-const VISUAL_FINGERPRINTS: Record<string, { ar: [number, number], ed: [number, number] }> = {
-  'PALLAS': { ar: [1.2, 2.5], ed: [0.10, 0.40] },
-  'KINGSUN': { ar: [0.8, 1.3], ed: [0.30, 0.60] },
-  'HBMI': { ar: [1.5, 3.0], ed: [0.20, 0.50] },
-  'HTC': { ar: [0.9, 1.5], ed: [0.15, 0.45] }
-};
-
 const DETECT_CONFIG = {
   SCALE_FACTOR: 2.0 
 };
 
-// --- UTILS: FUZZY MATCHING (LEVENSHTEIN) ---
+// --- UTILS: FUZZY MATCHING ---
 const levenshteinDistance = (a: string, b: string): number => {
   const matrix = [];
   for (let i = 0; i <= b.length; i++) matrix[i] = [i];
@@ -47,7 +39,6 @@ const levenshteinDistance = (a: string, b: string): number => {
 };
 
 const fuzzyContains = (text: string, target: string, tolerance: number = 2): boolean => {
-  // CRITICAL FIX: Ignora targets muito curtos para evitar falsos positivos como "ORI" em ruído
   if (target.length < 4) return false;
 
   const words = text.split(/\s+/);
@@ -66,91 +57,174 @@ const fuzzyContains = (text: string, target: string, tolerance: number = 2): boo
   return false;
 };
 
-// --- FUNÇÕES VISUAIS ---
+// --- VISION ENGINE: CORES E FEATURES ---
 
-const calculateEdgeDensity = (data: Uint8ClampedArray, width: number, height: number): number => {
-  let edges = 0;
-  const threshold = 30;
-  const totalPixels = width * height;
-  const step = 2; 
+// Converte RGB para HSL (Matiz, Saturação, Luminosidade)
+const rgbToHsl = (r: number, g: number, b: number) => {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0, l = (max + min) / 2;
 
-  for (let y = 0; y < height; y += step) {
-    for (let x = 0; x < width - 1; x += step) {
-      const i = (y * width + x) * 4;
-      const nextI = (y * width + (x + 1)) * 4;
-      const diff = Math.abs(data[i] - data[nextI]);
-      if (diff > threshold) edges++;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
     }
+    h /= 6;
   }
-  return Math.min(1.0, (edges * (step * step)) / totalPixels);
+  return [h * 360, s, l];
 };
 
-const enhanceImage = (ctx: CanvasRenderingContext2D, width: number, height: number): VisualFeatures => {
+const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, height: number): VisualFeatures => {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
   
-  // Contraste Agressivo
-  const contrast = 70; 
+  let rTotal = 0, gTotal = 0, bTotal = 0;
+  let edges = 0;
+  const totalPixels = width * height;
+  const step = 4; // Amostragem para performance
+
+  // Análise de Cor Média e Textura (Edge) em uma passada
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width - 1; x += step) {
+      const i = (y * width + x) * 4;
+      
+      // Acumula Cor
+      rTotal += data[i];
+      gTotal += data[i + 1];
+      bTotal += data[i + 2];
+
+      // Detecta Borda (Horizontal simples)
+      const nextI = (y * width + (x + 1)) * 4;
+      const diff = Math.abs(data[i] - data[nextI]); // Diferença de brilho
+      if (diff > 30) edges++;
+    }
+  }
+
+  const pixelCount = (width * height) / (step * step);
+  const avgR = rTotal / pixelCount;
+  const avgG = gTotal / pixelCount;
+  const avgB = bTotal / pixelCount;
+
+  // Calcula HSL
+  const [hue, saturation, lightness] = rgbToHsl(avgR, avgG, avgB);
+
+  // Calcula Densidade de Borda
+  const edgeDensity = Math.min(1.0, (edges * step) / (width * height));
+
+  return {
+    aspectRatio: width / height,
+    edgeDensity: edgeDensity,
+    hue: hue,
+    saturation: saturation,
+    brightness: lightness * 255
+  };
+};
+
+// Aplica filtros APENAS para o OCR (destrutivo para cores)
+const applyOcrFilters = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  
+  // Contraste Extremo e Binarização Suave
+  const contrast = 60; 
   const factor = (255 + contrast) / (255 * (255 - contrast));
 
   for (let i = 0; i < data.length; i += 4) {
+    // Grayscale
     const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    
+    // Contraste
     let newValue = factor * (gray - 128) + 128;
-    if (newValue > 160) newValue = 255;
-    else if (newValue < 90) newValue = 0; 
+    
+    // Thresholding suave para manter detalhes finos
+    if (newValue > 180) newValue = 255; // Limpa fundo branco
+    else if (newValue < 80) newValue = 0; // Reforça texto preto
     
     data[i] = newValue;
     data[i + 1] = newValue;
     data[i + 2] = newValue;
   }
-
   ctx.putImageData(imageData, 0, 0);
-  const aspectRatio = width / height;
-  const edgeDensity = calculateEdgeDensity(data, width, height);
-  return { aspectRatio, edgeDensity };
 };
 
-const preprocessImage = async (base64Image: string): Promise<{ imgUrl: string, features: VisualFeatures }> => {
+const preprocessImage = async (base64Image: string): Promise<{ ocrImageUrl: string, features: VisualFeatures }> => {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       if (!ctx) { 
-        resolve({ imgUrl: base64Image, features: { aspectRatio: img.width/img.height, edgeDensity: 0 } }); 
+        resolve({ 
+            ocrImageUrl: base64Image, 
+            features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 } 
+        }); 
         return; 
       }
 
       canvas.width = img.width * DETECT_CONFIG.SCALE_FACTOR;
       canvas.height = img.height * DETECT_CONFIG.SCALE_FACTOR;
+      
+      // 1. Desenha imagem original
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      const features = enhanceImage(ctx, canvas.width, canvas.height);
+      
+      // 2. Extrai Features da imagem COLORIDA original
+      const features = extractVisualFeatures(ctx, canvas.width, canvas.height);
 
-      resolve({ imgUrl: canvas.toDataURL('image/jpeg', 0.9), features });
+      // 3. Aplica filtros para OCR (Modifica o canvas)
+      applyOcrFilters(ctx, canvas.width, canvas.height);
+
+      // 4. Retorna a imagem filtrada para o Tesseract + Features originais
+      resolve({ ocrImageUrl: canvas.toDataURL('image/jpeg', 0.9), features });
     };
-    img.onerror = () => resolve({ imgUrl: base64Image, features: { aspectRatio: 1, edgeDensity: 0 } });
+    
+    img.onerror = () => resolve({ 
+        ocrImageUrl: base64Image, 
+        features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 } 
+    });
+    
     img.src = `data:image/jpeg;base64,${base64Image}`;
   });
 };
 
-// --- MATCHING VISUAL (A "Memória Fotográfica") ---
-const findVisualMatch = (currentFeatures: VisualFeatures, trainingData: TrainingExample[]): TrainingExample | null => {
+// --- MATCHING VISUAL PONDERADO ---
+const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[]): TrainingExample | null => {
   let bestMatch: TrainingExample | null = null;
-  // Distância máxima para considerar "igual" (ajustado empiricamente)
-  // AR costuma variar entre 0.5 e 3.0. ED entre 0.0 e 1.0.
-  let minDistance = 0.15; 
+  
+  // Limite super estrito para "Auto Match" (5% de diferença global)
+  // Isso impede que luminárias parecidas mas diferentes sejam tratadas como iguais
+  let minDiff = 0.05; 
 
   for (const example of trainingData) {
     if (!example.features) continue;
+    const ef = example.features;
 
-    const dAR = Math.abs(currentFeatures.aspectRatio - example.features.aspectRatio);
-    const dED = Math.abs(currentFeatures.edgeDensity - example.features.edgeDensity);
+    // 1. Diferença de Aspect Ratio (Formato) - Peso Alto (40%)
+    // Normalizado para porcentagem
+    const diffAR = Math.abs(current.aspectRatio - ef.aspectRatio) / Math.max(current.aspectRatio, ef.aspectRatio);
+
+    // 2. Diferença de Cor (Hue) - Peso Médio (30%)
+    // Hue é circular (0-360), a maior diferença possível é 180.
+    const hueDist = Math.min(Math.abs(current.hue - ef.hue), 360 - Math.abs(current.hue - ef.hue));
+    const diffHue = hueDist / 180.0;
     
-    // Distância Euclidiana simples
-    const distance = Math.sqrt(dAR*dAR + dED*dED);
+    // Diferença de Saturação e Brilho (Auxiliares de Cor)
+    const diffSat = Math.abs(current.saturation - ef.saturation);
+    const diffBri = Math.abs(current.brightness - ef.brightness) / 255.0;
 
-    if (distance < minDistance) {
-      minDistance = distance;
+    // 3. Diferença de Textura (Edge) - Peso Médio (30%)
+    const diffED = Math.abs(current.edgeDensity - ef.edgeDensity);
+
+    // Score Final Ponderado
+    // AR(0.4) + Color(0.3) + Texture(0.3)
+    const colorScore = (diffHue * 0.6) + (diffSat * 0.2) + (diffBri * 0.2); // Composição da cor
+    const totalDiff = (diffAR * 0.4) + (colorScore * 0.3) + (diffED * 0.3);
+
+    if (totalDiff < minDiff) {
+      minDiff = totalDiff;
       bestMatch = example;
     }
   }
@@ -164,24 +238,25 @@ export const analyzeLuminaireImage = async (
   trainingData: TrainingExample[]
 ): Promise<AnalysisResponse> => {
   
-  // 1. Pré-processamento e Extração de Features Visuais
-  const { imgUrl: processedImage, features } = await preprocessImage(base64Image);
+  // 1. Processamento Duplo: Extração Visual + Filtro OCR
+  const { ocrImageUrl, features } = await preprocessImage(base64Image);
 
-  // 2. TENTATIVA 1: MEMÓRIA VISUAL (Super Rápido e Preciso para Lotes Repetidos)
-  // Se a imagem é visualmente idêntica a uma treinada, usa a resposta treinada.
+  // 2. MEMÓRIA VISUAL ESTRITA
   const visualMatch = findVisualMatch(features, trainingData);
+  
+  // Só retorna match visual se for REALMENTE parecido (threshold < 0.05 no findVisualMatch)
   if (visualMatch) {
     return {
       model: visualMatch.model,
       calculatedPower: visualMatch.power,
-      confidence: 0.99, // Confiança quase total na memória visual
-      rawText: "Visual Match",
-      reasoning: "Reconhecimento Visual: Identificado por similaridade de imagem com item treinado.",
+      confidence: 0.98,
+      rawText: "Visual Match (Identidade Confirmada)",
+      reasoning: "Reconhecimento Visual: Cor, Formato e Textura > 95% compatíveis.",
       features: features
     };
   }
 
-  // 3. OCR (Se não reconheceu visualmente)
+  // 3. OCR (Fallback ou Confirmação)
   try {
     const worker = await Tesseract.createWorker('eng');
     await worker.setParameters({
@@ -189,12 +264,12 @@ export const analyzeLuminaireImage = async (
       tessedit_pageseg_mode: '6' as any,
     });
 
-    const ret = await worker.recognize(processedImage);
+    const ret = await worker.recognize(ocrImageUrl);
     const text = ret.data.text;
     await worker.terminate();
 
     const result = processExtractedText(text, features, trainingData);
-    result.features = features; // Anexa features para salvar depois
+    result.features = features; 
     return result;
 
   } catch (error) {
@@ -222,9 +297,9 @@ const processExtractedText = (
   
   let model: string | null = null;
   let power: number | null = null;
-  let reasoningParts: string[] = [`OCR: "${cleanText}"`];
+  let reasoningParts: string[] = [`OCR: "${cleanText.substring(0, 30)}..."`];
 
-  // ESTRATÉGIA 2: TEXTO TREINADO (Conceitual)
+  // ESTRATÉGIA 2: TEXTO TREINADO
   const knownModels = new Set<string>();
   trainingData.forEach(t => knownModels.add(t.model));
   Object.keys(MODEL_VALID_POWERS).forEach(m => knownModels.add(m));
@@ -232,18 +307,18 @@ const processExtractedText = (
   for (const knownModel of knownModels) {
     if (fuzzyContains(cleanText, knownModel, 2)) {
       model = knownModel;
-      reasoningParts.push(`Padrão de Texto: ${model}`);
+      reasoningParts.push(`Texto: ${model}`);
       break;
     }
   }
 
-  // ESTRATÉGIA 3: MEMÓRIA DE ASSINATURA EXATA (Fallback)
+  // ESTRATÉGIA 3: ASSINATURA EXATA
   if (!model) {
     for (const example of trainingData) {
       if (example.ocrSignature && cleanText.includes(example.ocrSignature)) {
         model = example.model;
         if (!power) power = example.power;
-        reasoningParts.push(`Assinatura OCR Exata`);
+        reasoningParts.push(`Assinatura OCR`);
         break;
       }
     }
@@ -255,6 +330,7 @@ const processExtractedText = (
 
   if (numbers) {
     const candidates = numbers.map(n => parseInt(n, 10)).filter(val => {
+      // Filtra voltagens e anos comuns
       return ![110, 127, 220, 230, 240, 380, 2023, 2024, 2025].includes(val);
     });
 
@@ -288,7 +364,7 @@ const processExtractedText = (
   // CÁLCULO DE CONFIANÇA
   let confidence = 0.3;
   if (model && power) confidence = 1.0; 
-  else if (model) confidence = 0.6;
+  else if (model) confidence = 0.7;
   else if (power) confidence = 0.5;
 
   return {
