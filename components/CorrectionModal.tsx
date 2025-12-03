@@ -34,28 +34,30 @@ const CorrectionModal: React.FC<CorrectionModalProps> = ({ isOpen, data, onSave,
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
               <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
             </svg>
-            Treinamento & Correção
+            Treinar Reconhecimento
           </h3>
         </div>
         
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <p className="text-sm text-gray-600">
-            A IA ficou em dúvida ou precisa de confirmação. Por favor, ajude a "treinar" o sistema informando os dados corretos.
-          </p>
+          <div className="bg-orange-50 border-l-4 border-orange-400 p-3 mb-4">
+             <p className="text-xs text-orange-800 font-mono mb-1">OCR LEU:</p>
+             <p className="text-sm font-bold text-gray-800 break-words">"{data.rawText}"</p>
+             <p className="text-[10px] text-orange-600 mt-1">O sistema aprenderá que esse texto acima significa o modelo abaixo.</p>
+          </div>
 
-          <div className="flex justify-center mb-4 bg-gray-100 rounded-lg p-2">
-             <img src={data.imageUrl} alt="Preview" className="h-32 object-contain rounded" />
+          <div className="flex justify-center mb-2 bg-gray-100 rounded-lg p-2">
+             <img src={data.imageUrl} alt="Preview" className="h-24 object-contain rounded" />
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Modelo da Luminária</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Modelo Correto</label>
             <input
               type="text"
               required
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Ex: LUXA200"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 uppercase"
+              placeholder="Ex: PALLAS"
             />
           </div>
 
@@ -69,9 +71,6 @@ const CorrectionModal: React.FC<CorrectionModalProps> = ({ isOpen, data, onSave,
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
               placeholder="Ex: 60"
             />
-            <p className="text-xs text-gray-400 mt-1">
-              Lembre-se: 06 etiqueta = 60W. Digite o valor final (60).
-            </p>
           </div>
 
           <div className="flex justify-end gap-3 pt-4">
@@ -86,7 +85,7 @@ const CorrectionModal: React.FC<CorrectionModalProps> = ({ isOpen, data, onSave,
               type="submit"
               className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-md shadow-sm transition-colors"
             >
-              Confirmar & Aprender
+              Aprender Padrão
             </button>
           </div>
         </form>

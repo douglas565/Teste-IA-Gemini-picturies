@@ -6,13 +6,15 @@ export interface DetectionResult {
   power: number | null;
   confidence: number;
   reasoning: string;
+  rawText?: string; // O que o OCR leu de verdade
   status: 'confirmed' | 'pending_review' | 'auto_detected';
 }
 
 export interface TrainingExample {
   model: string;
   power: number;
-  visualDescription?: string; // Optional context about what was seen
+  ocrSignature?: string; // O padrão de texto "errado" que identifica este modelo
+  visualDescription?: string;
 }
 
 // Response structure for the internal OCR service

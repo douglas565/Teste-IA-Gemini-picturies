@@ -1,10 +1,7 @@
 import Tesseract from 'tesseract.js';
 import { AnalysisResponse, TrainingExample } from "../types";
 
-// --- CONFIGURAÇÃO DA BASE DE DADOS (Baseada no Python) ---
-
-// Lista de potências válidas por modelo
-// Isso ajuda o OCR a decidir: se leu "PALLAS" e tem o número "60" solto, é 60W com certeza.
+// --- TABELAS DE REFERÊNCIA (STRICT) ---
 const MODEL_VALID_POWERS: Record<string, number[]> = {
   'PALLAS': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
   'KINGSUN': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
@@ -16,99 +13,63 @@ const MODEL_VALID_POWERS: Record<string, number[]> = {
   'SANLIGHT': [20, 30, 40, 50, 60, 100]
 };
 
-// Variações de nome de modelos para normalização
-const MODEL_VARIATIONS: Record<string, string> = {
-  'KING SUN': 'KINGSUN', 'KINGSUN': 'KINGSUN',
-  'BRIGHT LUX': 'BRIGHTLUX', 'BRIGHTLUX': 'BRIGHTLUX',
-  'SAN LIGHT': 'SANLIGHT', 'SANLIGHT': 'SANLIGHT',
-  'H B M I': 'HBMI', 'HBMI': 'HBMI',
-  'H.T.C': 'HTC', 'HTC': 'HTC',
-  'PALLAS': 'PALLAS',
-  'IESNA': 'IESNA',
-  'ORI': 'ORI'
-};
-
-// Configurações de "Detecção" (Simulando parâmetros Canny do Python)
-// Ajustados para 30 e 100 conforme solicitado para capturar detalhes mais finos
 const DETECT_CONFIG = {
-  CANNY_THRESHOLD_1: 30,  // Limiar inferior (detalhes finos)
-  CANNY_THRESHOLD_2: 100, // Limiar superior (bordas fortes)
-  SCALE_FACTOR: 2.5       // Fator de escala para melhorar OCR em textos pequenos
+  CANNY_THRESHOLD_1: 30,
+  CANNY_THRESHOLD_2: 100,
+  SCALE_FACTOR: 2.0 
 };
 
 /**
- * Simula o método 'detect_objects' do Python.
- * Aplica processamento de imagem focado em realçar bordas e texto fino
- * baseado nos thresholds solicitados (30/100).
+ * Processamento de imagem focado em preservar o texto
+ * Usa ajuste de histograma simulado em vez de binarização destrutiva
  */
-const detectObjects = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+const enhanceImage = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
 
-  // Lógica baseada nos thresholds solicitados: 30 e 100.
-  // No contexto de binarização para OCR:
-  // Pixels mais escuros que o Threshold 2 (100) são candidatos fortes a texto.
-  // O Threshold 1 (30) ajuda a garantir o preto absoluto.
-  
+  // Ajuste de contraste linear
+  const contrast = 50; // Aumenta contraste
+  const factor = (255 + contrast) / (255 * (255 - contrast));
+
   for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
+    // 1. Grayscale
+    const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
 
-    // 1. Converter para Escala de Cinza (Luminância)
-    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-
-    // 2. Aplicar Binarização baseada nos Thresholds "Canny"
-    // O valor 100 (Threshold 2) define o ponto de corte para "detalhes finos".
-    // Se o cinza for menor que 100 (mais escuro), consideramos texto (0 = preto).
-    // Se for maior, consideramos fundo (255 = branco).
-    // O ajuste de 150 para 100 torna o filtro mais "agressivo" em manter apenas o que é realmente escuro,
-    // mas combinamos com um aumento de contraste prévio para destacar o texto fino.
+    // 2. Contraste
+    let newValue = factor * (gray - 128) + 128;
     
-    // Simulação de realce de bordas (Sharpening simples via contraste)
-    let finalVal = 255;
-    
-    // Se for escuro o suficiente (baseado no threshold superior 100)
-    if (gray < DETECT_CONFIG.CANNY_THRESHOLD_2) {
-      finalVal = 0; // Texto Preto
-    } else {
-      // Zona de transição (entre 100 e 150) - tentar salvar detalhes muito finos
-      // Se tiver variação de cor (não for cinza puro), pode ser ruído, então limpa.
-      finalVal = 255; 
-    }
+    // 3. Threshold suave (preserva bordas finas)
+    // Valores muito claros viram branco puro para limpar fundo
+    // Valores escuros são preservados
+    if (newValue > 180) newValue = 255;
+    else if (newValue < 80) newValue = 0; // Texto preto forte
+    // Entre 80 e 180 mantém o tom de cinza para antialiasing do texto
 
-    data[i] = finalVal;     
-    data[i + 1] = finalVal; 
-    data[i + 2] = finalVal; 
+    data[i] = newValue;
+    data[i + 1] = newValue;
+    data[i + 2] = newValue;
   }
 
   ctx.putImageData(imageData, 0, 0);
 };
 
 const preprocessImage = async (base64Image: string): Promise<string> => {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        resolve(base64Image);
-        return;
-      }
+      if (!ctx) { resolve(base64Image); return; }
 
-      // Escala maior ajuda o Tesseract a ler fontes pequenas
       canvas.width = img.width * DETECT_CONFIG.SCALE_FACTOR;
       canvas.height = img.height * DETECT_CONFIG.SCALE_FACTOR;
       
-      // Desenha imagem redimensionada (Melhora a resolução espacial)
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      
-      // CHAMA O MÉTODO DETECT_OBJECTS (Simulado)
-      detectObjects(ctx, canvas.width, canvas.height);
+      enhanceImage(ctx, canvas.width, canvas.height);
 
       resolve(canvas.toDataURL('image/jpeg', 0.9));
     };
-    img.onerror = reject;
+    img.onerror = () => resolve(base64Image);
     img.src = `data:image/jpeg;base64,${base64Image}`;
   });
 };
@@ -122,147 +83,122 @@ export const analyzeLuminaireImage = async (
     const processedImage = await preprocessImage(base64Image);
 
     worker = await Tesseract.createWorker('eng');
-    
-    // Configura parâmetros para OCR industrial
     await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /W',
-      tessedit_pageseg_mode: '6' as any, // 6 = Assume um bloco uniforme de texto (bom para etiquetas)
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /',
+      tessedit_pageseg_mode: '6' as any, // 6 = Bloco de texto uniforme
     });
 
     const ret = await worker.recognize(processedImage);
     const text = ret.data.text;
     const confidence = ret.data.confidence / 100;
-
     await worker.terminate();
 
     return processExtractedText(text, confidence, trainingData);
 
   } catch (error) {
-    console.error("OCR Failed:", error);
-    if(worker) await worker.terminate();
     return {
       model: null,
-      rawText: "Erro OCR",
+      rawText: "Erro de Leitura",
       calculatedPower: null,
       confidence: 0,
-      reasoning: "Falha técnica ao processar imagem."
+      reasoning: "Falha OCR"
     };
   }
 };
 
 const processExtractedText = (text: string, ocrConfidence: number, trainingData: TrainingExample[]): AnalysisResponse => {
-  // Limpeza robusta
   const cleanText = text.toUpperCase()
-    .replace(/[^A-Z0-9\-\. \/]/g, ' ') // Mantém apenas caracteres úteis
-    .replace(/\s+/g, ' ') // Remove espaços duplos
+    .replace(/[^A-Z0-9\-\. \/]/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
   
   let model: string | null = null;
   let power: number | null = null;
-  let reasoningParts: string[] = [];
+  let reasoningParts: string[] = [`Leitura: "${cleanText}"`];
 
-  reasoningParts.push(`OCR (Raw): "${cleanText.substring(0, 30)}..."`);
-
-  // --- 1. MEMÓRIA & APRENDIZADO (Fuzzy Match) ---
-  // Verifica se o texto lido contém alguma "assinatura" que o usuário já ensinou
+  // --- 1. APRENDIZADO POR ASSINATURA (Inteligente) ---
+  // Verifica se esse exato texto "errado" já foi corrigido antes
   for (const example of trainingData) {
-    // Procura o nome do modelo OU o texto raw que gerou o aprendizado
-    if (cleanText.includes(example.model.toUpperCase())) {
+    if (example.ocrSignature && cleanText.includes(example.ocrSignature)) {
       model = example.model;
       power = example.power;
-      reasoningParts.push(`Reconhecido da memória (Modelo: ${model})`);
+      reasoningParts.push(`Identificado por memória de aprendizado (Assinatura: ${example.ocrSignature})`);
+      return {
+        model, rawText: cleanText, calculatedPower: power, confidence: 1.0, 
+        reasoning: reasoningParts.join(". ")
+      };
+    }
+  }
+
+  // --- 2. DETECÇÃO DE MODELO VIA REGEX ---
+  const modelPatterns = [
+    { regex: /PALLAS|PA11AS|P4LLAS/i, name: 'PALLAS' },
+    { regex: /KING\s?SUN|K1NG/i, name: 'KINGSUN' },
+    { regex: /BRIGHT\s?LUX/i, name: 'BRIGHTLUX' },
+    { regex: /SAN\s?LIGHT/i, name: 'SANLIGHT' },
+    { regex: /H\s?B\s?M\s?I/i, name: 'HBMI' },
+    { regex: /H\.?T\.?C/i, name: 'HTC' },
+    { regex: /IESNA/i, name: 'IESNA' },
+    { regex: /ORI\b/i, name: 'ORI' }
+  ];
+
+  for (const p of modelPatterns) {
+    if (p.regex.test(cleanText)) {
+      model = p.name;
       break;
     }
-    
-    // Se o usuário ensinou que "XYZ" é "PALLAS", e achamos "XYZ"
-    // (Esta lógica depende de salvar o 'rawText' no exemplo de treino, 
-    // assumindo que o app passa isso corretamente).
   }
 
-  // --- 2. IDENTIFICAÇÃO DE MODELO (Regex) ---
-  if (!model) {
-    const modelPatterns = [
-      /PALLAS/i, /PA11AS/i, /P4LLAS/i, // Variações comuns de OCR para Pallas
-      /KING\s?SUN/i, /K1NG/i,
-      /BRIGHT\s?LUX/i,
-      /SAN\s?LIGHT/i,
-      /H\s?B\s?M\s?I/i,
-      /H\.?T\.?C/i,
-      /IESNA/i, /1ESNA/i,
-      /ORI\b/i
-    ];
+  // --- 3. EXTRAÇÃO DE POTÊNCIA (Com regra 06->60 PRIORITÁRIA) ---
+  const numbers = cleanText.match(/\b\d+\b/g);
+  
+  if (numbers) {
+    // Filtra números irrelevantes primeiro
+    const validNumbers = numbers.filter(n => {
+      const val = parseInt(n, 10);
+      // Ignora voltagens e anos comuns
+      if ([110, 127, 220, 230, 240, 380, 2023, 2024, 2025].includes(val)) return false;
+      return true;
+    });
 
-    for (const pattern of modelPatterns) {
-      if (pattern.test(cleanText)) {
-        // Encontra qual modelo oficial corresponde a esse padrão
-        // Mapeamento manual reverso simplificado para os casos fuzzy
-        if (/PALLAS|PA11AS|P4LLAS/i.test(cleanText)) model = 'PALLAS';
-        else if (/KING|K1NG/i.test(cleanText)) model = 'KINGSUN';
-        else if (/BRIGHT/i.test(cleanText)) model = 'BRIGHTLUX';
-        else if (/SAN/i.test(cleanText)) model = 'SANLIGHT';
-        else if (/HBMI/i.test(cleanText)) model = 'HBMI';
-        else if (/HTC/i.test(cleanText)) model = 'HTC';
-        else if (/IESNA|1ESNA/i.test(cleanText)) model = 'IESNA';
-        else if (/ORI/i.test(cleanText)) model = 'ORI';
-        
-        reasoningParts.push(`Padrão visual detectado: ${model}`);
-        break;
+    for (const numStr of validNumbers) {
+      const val = parseInt(numStr, 10);
+      let potentialPower = val;
+      
+      // REGRA DE CONVERSÃO OBRIGATÓRIA (01-09 -> x10)
+      let converted = false;
+      if (val >= 1 && val <= 9) {
+        potentialPower = val * 10;
+        converted = true;
+      }
+
+      // Se temos um modelo, VALIDAR ESTRITAMENTE
+      if (model && MODEL_VALID_POWERS[model]) {
+        if (MODEL_VALID_POWERS[model].includes(potentialPower)) {
+          power = potentialPower;
+          reasoningParts.push(`Potência ${power}W confirmada na tabela ${model} ${converted ? '(convertida de '+val+')' : ''}`);
+          break;
+        }
+      } 
+      // Se não temos modelo, ou o número não bateu com a tabela, 
+      // mas parece muito ser uma potência (ex: 60, 100), guardamos como backup
+      else if (!power && potentialPower >= 10 && potentialPower <= 500) {
+        power = potentialPower; 
       }
     }
   }
 
-  // --- 3. EXTRAÇÃO DE POTÊNCIA ---
-  if (power === null) {
-    const numbers = cleanText.match(/\b\d+\b/g);
-    
-    if (numbers) {
-      for (const numStr of numbers) {
-        let val = parseInt(numStr, 10);
-        
-        // Filtros de exclusão (Voltagem, Frequencia, Ano)
-        const contextRegex = new RegExp(`${numStr}\\s?(V|VAC|HZ|K|LM|YEAR|ANO)`, 'i');
-        if (contextRegex.test(cleanText)) continue;
-        if ([110, 127, 220, 230, 240, 380].includes(val)) continue;
-        if (val > 1990 && val < 2030) continue;
-
-        let potentialPower = val;
-
-        // Regra 1: Conversão de Etiqueta (01-09 -> x10)
-        // PRIORIDADE: Se o número é pequeno e isolado, converte ANTES de validar
-        if (val >= 1 && val <= 9) {
-          potentialPower = val * 10;
-          reasoningParts.push(`Regra etiqueta (0${val} -> ${potentialPower}W)`);
-        } else if (val >= 10) {
-          reasoningParts.push(`Valor direto (${val}W)`);
-        }
-
-        // Validação com Lista do Modelo (se tiver modelo)
-        if (model && MODEL_VALID_POWERS[model]) {
-          if (MODEL_VALID_POWERS[model].includes(potentialPower)) {
-            power = potentialPower;
-            reasoningParts.push(`Confirmado na lista técnica do ${model}`);
-            break; // Match perfeito
-          }
-        } else {
-          // Se não tem modelo, aceita o primeiro valor razoável que foi convertido ou lido
-          if (!power && potentialPower >= 10 && potentialPower <= 500) {
-            power = potentialPower;
-          }
-        }
-      }
-    }
+  // Fallback: Se achou modelo Pallas mas não achou potência, tenta achar "06" ou "08" de novo
+  if (model === 'PALLAS' && !power) {
+     if (cleanText.includes(' 06 ') || cleanText.endsWith(' 06')) power = 60;
+     if (cleanText.includes(' 08 ') || cleanText.endsWith(' 08')) power = 80;
   }
-
-  // Confiança final
-  let finalConfidence = ocrConfidence;
-  if (model) finalConfidence += 0.3;
-  if (power) finalConfidence += 0.3;
 
   return {
     model: model,
     rawText: cleanText,
     calculatedPower: power,
-    confidence: Math.min(finalConfidence, 0.99), // Cap em 99%
-    reasoning: reasoningParts.join(". ") || "Dados inconclusivos."
+    confidence: (model && power) ? 0.9 : (model ? 0.6 : 0.3),
+    reasoning: reasoningParts.join(". ") || "Não identificado."
   };
 };
