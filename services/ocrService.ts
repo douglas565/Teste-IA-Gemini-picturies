@@ -505,22 +505,8 @@ export const analyzeLuminaireImage = async (
   
   const { normalUrl, invertedUrl, features, processedPreview } = await preprocessImage(base64Image);
 
-  // 1. Tenta Match Visual
-  const visualMatch = findVisualMatch(features, trainingData);
-  
-  if (visualMatch) {
-    return {
-      model: visualMatch.model,
-      calculatedPower: visualMatch.power,
-      confidence: 0.95,
-      rawText: "RECONHECIMENTO VISUAL (Geometria + Textura)",
-      reasoning: "Objeto idêntico detectado na base de memória.",
-      features: features,
-      processedPreview: processedPreview
-    };
-  }
-
-  // 2. Se não achou visualmente, roda OCR
+  // 1. SEMPRE EXECUTA O OCR (Prioridade na Etiqueta)
+  let ocrResult: AnalysisResponse | null = null;
   try {
     const worker = await Tesseract.createWorker('eng');
     // Whitelist estrita para evitar lixo
@@ -536,26 +522,56 @@ export const analyzeLuminaireImage = async (
 
     const combinedText = `${resNormal.data.text} \n ${resInverted.data.text}`;
     
-    const result = processExtractedText(combinedText, features, trainingData);
-    
-    return {
-        ...result,
-        features,
-        processedPreview
-    };
-
+    ocrResult = processExtractedText(combinedText, features, trainingData);
   } catch (error) {
-    console.error(error);
-    return {
-      model: null,
-      rawText: "Erro OCR",
-      calculatedPower: null,
-      confidence: 0,
-      reasoning: "Falha no processamento de imagem.",
-      features: features,
-      processedPreview
-    };
+    console.error("OCR falhou, tentando fallback visual", error);
   }
+
+  // 2. Busca Match Visual (Memória)
+  const visualMatch = findVisualMatch(features, trainingData);
+  
+  // 3. Cruzamento e Decisão (Merge)
+  let finalModel = ocrResult?.model || null;
+  let finalPower = ocrResult?.calculatedPower || null;
+  let finalConfidence = ocrResult?.confidence || 0;
+  let finalReasoning = ocrResult?.reasoning || "";
+
+  // Se o OCR falhou ou está incompleto, usamos o visual para preencher
+  if (visualMatch) {
+    // Se OCR não achou modelo, usa do visual
+    if (!finalModel) {
+      finalModel = visualMatch.model;
+      finalReasoning += ` | Modelo sugerido por memória visual.`;
+      finalConfidence = Math.max(finalConfidence, 0.7); // Confiança visual
+    }
+
+    // Se OCR não achou potência, usa do visual
+    if (!finalPower) {
+      finalPower = visualMatch.power;
+      finalReasoning += ` | Potência sugerida por memória visual.`;
+      finalConfidence = Math.max(finalConfidence, 0.7);
+    } 
+    // Se OCR achou potência, mas é diferente da visual?
+    else if (finalPower !== visualMatch.power) {
+      // PREFERÊNCIA: OCR (Etiqueta). Mas avisa no reasoning.
+      finalReasoning += ` | Potência da etiqueta (${finalPower}W) difere da memória visual (${visualMatch.power}W). Usando etiqueta.`;
+      finalConfidence = 0.85; // Alta confiança pois lemos a etiqueta
+    } else {
+      // OCR e Visual concordam
+      finalConfidence = 0.99;
+      finalReasoning += ` | Confirmado por memória visual.`;
+    }
+  }
+
+  return {
+    model: finalModel,
+    rawText: ocrResult ? ocrResult.rawText : "Falha OCR",
+    calculatedPower: finalPower,
+    confidence: finalConfidence,
+    reasoning: finalReasoning,
+    features: features,
+    processedPreview: processedPreview
+  };
 };
 
 const processExtractedText = (

@@ -172,6 +172,7 @@ const App: React.FC = () => {
   const [itemToEdit, setItemToEdit] = useState<DetectionResult | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const jsonInputRef = useRef<HTMLInputElement>(null);
 
   const CONFIDENCE_THRESHOLD = 0.85;
 
@@ -225,7 +226,7 @@ const App: React.FC = () => {
         const base64String = reader.result as string;
         const base64Data = base64String.split(',')[1];
 
-        // O analyzeLuminaireImage agora verifica a memória visual primeiro!
+        // O analyzeLuminaireImage agora cruza memória visual com OCR
         const analysisResponse = await analyzeLuminaireImage(base64Data, trainingData);
 
         const isLowConfidence = analysisResponse.confidence < CONFIDENCE_THRESHOLD;
@@ -311,6 +312,52 @@ const App: React.FC = () => {
     }
   };
 
+  // --- EXPORTAR / IMPORTAR MEMÓRIA ---
+  const exportMemory = () => {
+    if (trainingData.length === 0) {
+      alert("Não há dados de treinamento para exportar.");
+      return;
+    }
+    const dataStr = JSON.stringify(trainingData, null, 2);
+    const blob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `lumiscan_memoria_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const triggerImport = () => {
+    if (jsonInputRef.current) jsonInputRef.current.click();
+  };
+
+  const handleImportMemory = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const json = JSON.parse(e.target?.result as string);
+        if (Array.isArray(json)) {
+          // Merge com dados existentes, evitando duplicatas exatas se possível, 
+          // mas por segurança apenas concatenamos e o usuário gerencia.
+          setTrainingData(prev => [...prev, ...json]);
+          alert(`${json.length} registros de memória importados com sucesso!`);
+        } else {
+          alert("Arquivo JSON inválido. Formato esperado: Array de exemplos.");
+        }
+      } catch (err) {
+        console.error(err);
+        alert("Erro ao ler arquivo JSON.");
+      }
+    };
+    reader.readAsText(file);
+    if (jsonInputRef.current) jsonInputRef.current.value = '';
+  };
+
   const isWorking = queue.length > 0 || isProcessingQueue;
 
   return (
@@ -328,7 +375,7 @@ const App: React.FC = () => {
            </div>
         </div>
 
-        <div className="space-y-6 flex-1">
+        <div className="space-y-6 flex-1 overflow-y-auto">
           {isWorking && (
             <div className="bg-indigo-900/50 p-4 rounded-lg border border-indigo-500/30 animate-pulse">
               <h3 className="text-xs uppercase text-indigo-300 font-bold mb-1">Processando Lote</h3>
@@ -343,10 +390,41 @@ const App: React.FC = () => {
                <div className="text-3xl font-bold text-white mb-1 relative z-10">{trainingData.length}</div>
                <p className="text-xs text-slate-400 relative z-10">Padrões Aprendidos</p>
             </div>
+            
+            <div className="grid grid-cols-2 gap-2 mt-3">
+              <button 
+                onClick={exportMemory}
+                className="bg-slate-700 hover:bg-slate-600 text-xs py-2 px-2 rounded flex items-center justify-center gap-1 transition-colors"
+                title="Salvar memória em arquivo JSON"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Exportar
+              </button>
+              <button 
+                onClick={triggerImport}
+                className="bg-slate-700 hover:bg-slate-600 text-xs py-2 px-2 rounded flex items-center justify-center gap-1 transition-colors"
+                title="Carregar memória de arquivo JSON"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                </svg>
+                Importar
+              </button>
+              <input 
+                type="file" 
+                ref={jsonInputRef} 
+                onChange={handleImportMemory} 
+                className="hidden" 
+                accept=".json"
+              />
+            </div>
+
             {trainingData.length > 0 && (
               <button 
                 onClick={clearMemory}
-                className="mt-2 text-[10px] text-red-400 hover:text-red-300 underline"
+                className="mt-4 w-full text-center text-[10px] text-red-400 hover:text-red-300 underline"
               >
                 Limpar Memória
               </button>
@@ -360,7 +438,7 @@ const App: React.FC = () => {
            <div className="bg-white rounded-2xl shadow-lg border border-indigo-50 p-6 md:p-8 text-center relative overflow-hidden">
               <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Reconhecimento em Massa</h2>
               <p className="text-slate-500 mb-8 max-w-xl mx-auto relative z-10 text-sm md:text-base">
-                O sistema aprende visualmente. Carregue uma pasta inteira de luminárias.
+                O sistema prioriza a etiqueta, mas usa a memória visual quando a etiqueta falha.
               </p>
 
               <div className="flex justify-center relative z-10">
