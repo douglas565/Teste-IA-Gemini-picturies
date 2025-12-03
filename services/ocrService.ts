@@ -14,7 +14,8 @@ const MODEL_VALID_POWERS: Record<string, number[]> = {
 };
 
 const DETECT_CONFIG = {
-  SCALE_FACTOR: 2.0 
+  SCALE_FACTOR: 1.5, // Reduzi levemente para ganhar performance sem perder muita qualidade
+  MIN_BLOB_PERCENT: 0.005 // 0.5% da imagem
 };
 
 // --- UTILS: FUZZY MATCHING ---
@@ -39,19 +40,23 @@ const levenshteinDistance = (a: string, b: string): number => {
 };
 
 const fuzzyContains = (text: string, target: string, tolerance: number = 2): boolean => {
-  if (target.length < 4) return false;
-
-  const words = text.split(/\s+/);
+  if (target.length < 3) return false; // Ignora palavras muito curtas
   const targetUpper = target.toUpperCase();
+  
+  // Verifica substring direta primeiro (rápido)
+  if (text.includes(targetUpper)) return true;
+
+  // Verifica palavras isoladas com Levenshtein
+  const words = text.split(/[\s\-\/\.]+/);
   
   for (const word of words) {
     if (Math.abs(word.length - targetUpper.length) > tolerance) continue;
+    
+    // Se a palavra for curta, tolerância deve ser menor
+    const dynamicTolerance = targetUpper.length <= 4 ? 1 : tolerance;
+    
     const dist = levenshteinDistance(word, targetUpper);
-    if (dist <= tolerance) return true;
-  }
-  
-  if (targetUpper.includes(' ')) {
-      if (text.includes(targetUpper)) return true;
+    if (dist <= dynamicTolerance) return true;
   }
   
   return false;
@@ -77,19 +82,25 @@ const rgbToHsl = (r: number, g: number, b: number) => {
   return [h * 360, s, l];
 };
 
-const isNotSkyPixel = (r: number, g: number, b: number) => {
-  const brightness = (r + g + b) / 3;
-  // Sky heuristic: Very bright OR blue-dominant
-  // Ajustado para ser menos agressivo em dias nublados
-  const isSky = brightness > 220 || (b > r + 20 && b > g + 20 && brightness > 160);
-  return !isSky;
+// Determina se um pixel provavelmente é céu (fundo)
+const isSkyPixel = (r: number, g: number, b: number) => {
+  const [h, s, l] = rgbToHsl(r, g, b);
+  
+  // Céu Branco/Cinza Claro (Nublado ou Estourado)
+  if (l > 0.85) return true;
+  
+  // Céu Azul
+  // Hue do Azul é aprox 200-260. Vamos pegar de 170 a 270.
+  if (h > 170 && h < 270 && s > 0.15 && l > 0.4) return true;
+
+  return false;
 };
 
-// Detecta objetos usando componentes conectados simplificado
+// Detecta objetos ignorando o céu
 const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: number) => {
-  const visited = new Uint8Array(width * height); // 0 = unvisited
+  const visited = new Uint8Array(width * height);
   const blobs: {x: number, y: number, w: number, h: number, area: number}[] = [];
-  const scanStep = 4; // Performance optimization
+  const scanStep = 5; // Scan mais rápido
 
   const getIdx = (x: number, y: number) => y * width + x;
 
@@ -102,19 +113,21 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
       const g = data[idx * 4 + 1];
       const b = data[idx * 4 + 2];
 
-      if (isNotSkyPixel(r, g, b)) {
-        // Start Flood Fill
+      // Se NÃO for céu, começamos a explorar o objeto
+      if (!isSkyPixel(r, g, b)) {
         let minX = x, maxX = x, minY = y, maxY = y;
         let count = 0;
+        
+        // Stack-based Flood Fill simples
         const stack = [{x, y}];
         visited[idx] = 1;
+        
+        // Limite de segurança para loops
+        let loopCount = 0;
+        const maxLoop = 150000; 
 
-        // Limit stack size/depth to prevent browser freeze on huge blobs
-        let loopSafety = 0;
-        const maxLoop = 100000; 
-
-        while (stack.length > 0 && loopSafety < maxLoop) {
-          loopSafety++;
+        while (stack.length > 0 && loopCount < maxLoop) {
+          loopCount++;
           const p = stack.pop()!;
           count++;
 
@@ -123,7 +136,7 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
           if (p.y < minY) minY = p.y;
           if (p.y > maxY) maxY = p.y;
 
-          // Neighbors (Check coarse grid)
+          // Vizinhos (4-way)
           const neighbors = [
             {nx: p.x + scanStep, ny: p.y},
             {nx: p.x - scanStep, ny: p.y},
@@ -138,7 +151,7 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
                  const nr = data[nIdx * 4];
                  const ng = data[nIdx * 4 + 1];
                  const nb = data[nIdx * 4 + 2];
-                 if (isNotSkyPixel(nr, ng, nb)) {
+                 if (!isSkyPixel(nr, ng, nb)) {
                    visited[nIdx] = 1;
                    stack.push({x: n.nx, y: n.ny});
                  }
@@ -152,43 +165,37 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
           y: minY,
           w: maxX - minX + scanStep,
           h: maxY - minY + scanStep,
-          area: count // This is 'stepped' area unit
+          area: count
         });
       }
     }
   }
 
-  // FILTRO INTELIGENTE
-  const totalSteppedArea = (width * height) / (scanStep * scanStep);
-  const minArea = totalSteppedArea * 0.01; // 1% da imagem
+  // Filtragem
+  const totalSteppedPixels = (width * height) / (scanStep * scanStep);
+  const minPixels = totalSteppedPixels * DETECT_CONFIG.MIN_BLOB_PERCENT;
 
   const validBlobs = blobs.filter(b => {
-    // 1. Filtro de Área (Percentual)
-    if (b.area < minArea) return false;
-
+    // 1. Área mínima
+    if (b.area < minPixels) return false;
+    // 2. Formato (Fios longos horizontais ou postes finos verticais)
     const ar = b.w / b.h;
-
-    // 2. Filtro de Formato (Shape)
-    // Ignora "Muito Curto e Largo" (ex: fios)
-    if (ar > 3.0) return false; 
-    
-    // Ignora "Muito Alto e Fino" (ex: postes isolados)
-    if (ar < 0.2) return false;
-
+    if (ar > 4.0 || ar < 0.15) return false;
     return true;
   });
 
+  // Se nada sobrou, retorna o centro
   if (validBlobs.length === 0) {
-    // Fallback: Centro da imagem
     const cx = width / 2, cy = height / 2;
-    return { x: cx - width/4, y: cy - height/4, w: width/2, h: height/2 };
+    return { x: cx - width/3, y: cy - height/3, w: (width/3)*2, h: (height/3)*2 };
   }
 
-  // Seleciona o maior blob válido
+  // Ordena por área e pega o maior
   validBlobs.sort((a, b) => b.area - a.area);
   const best = validBlobs[0];
 
-  const padding = 20;
+  // Adiciona margem de segurança
+  const padding = 30;
   return {
     x: Math.max(0, best.x - padding),
     y: Math.max(0, best.y - padding),
@@ -199,100 +206,107 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
 
 const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, height: number): VisualFeatures => {
   const fullImageData = ctx.getImageData(0, 0, width, height);
-  
-  // 1. DETECT OBJECT BOUNDS (Filtros de Contorno)
   const bounds = detectObjectBounds(fullImageData.data, width, height);
   
-  // FILTRO DE ÁREA (Percentual da Imagem)
-  const imageArea = width * height;
-  const objectArea = bounds.w * bounds.h;
-  const coverageRatio = objectArea / imageArea;
-
-  // Se o objeto for muito pequeno (< 5%) ou ocupar a imagem toda (provavelmente erro),
-  // ajustamos os bounds para o centro para tentar ler algo, mas a feature será "ruim".
-  let finalBounds = bounds;
-  // Fallback suave
-  if (coverageRatio < 0.01) {
-     const cx = width / 2, cy = height / 2;
-     finalBounds = { x: cx - width/4, y: cy - height/4, w: width/2, h: height/2 };
-  }
-
-  // FILTRO DE FORMATO (Aspect Ratio)
-  const objectAR = finalBounds.w / finalBounds.h;
-  
-  // Extrai dados APENAS de dentro do Bounding Box detectado
-  const imageData = ctx.getImageData(finalBounds.x, finalBounds.y, finalBounds.w, finalBounds.h);
+  // Extração dentro do Bounding Box
+  const imageData = ctx.getImageData(bounds.x, bounds.y, bounds.w, bounds.h);
   const data = imageData.data;
   
-  let rTotal = 0, gTotal = 0, bTotal = 0;
+  const step = 4; // Amostragem para performance
+  let rAcc = 0, gAcc = 0, bAcc = 0, count = 0;
   let edges = 0;
-  const step = 2;
-  const cropWidth = finalBounds.w;
-  const cropHeight = finalBounds.h;
 
-  for (let y = 0; y < cropHeight - 1; y += step) {
-    for (let x = 0; x < cropWidth - 1; x += step) {
-      const i = (y * cropWidth + x) * 4;
+  for (let y = 0; y < bounds.h - step; y += step) {
+    for (let x = 0; x < bounds.w - step; x += step) {
+      const i = (y * bounds.w + x) * 4;
       
-      rTotal += data[i];
-      gTotal += data[i + 1];
-      bTotal += data[i + 2];
+      const r = data[i];
+      const g = data[i+1];
+      const b = data[i+2];
 
-      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+      rAcc += r; gAcc += g; bAcc += b;
+      count++;
+
+      // Edge detection simples (Luminância)
+      const lum = 0.299*r + 0.587*g + 0.114*b;
       
-      const iRight = (y * cropWidth + (x + 1)) * 4;
-      const grayRight = data[iRight] * 0.299 + data[iRight+1] * 0.587 + data[iRight+2] * 0.114;
+      const iRight = (y * bounds.w + (x + step)) * 4;
+      const lumRight = 0.299*data[iRight] + 0.587*data[iRight+1] + 0.114*data[iRight+2];
+      
+      const iDown = ((y + step) * bounds.w + x) * 4;
+      const lumDown = 0.299*data[iDown] + 0.587*data[iDown+1] + 0.114*data[iDown+2];
 
-      const iDown = ((y + 1) * cropWidth + x) * 4;
-      const grayDown = data[iDown] * 0.299 + data[iDown+1] * 0.587 + data[iDown+2] * 0.114;
-
-      const diffH = Math.abs(gray - grayRight);
-      const diffV = Math.abs(gray - grayDown);
-
-      if (diffH > 20 || diffV > 20) {
+      if (Math.abs(lum - lumRight) > 25 || Math.abs(lum - lumDown) > 25) {
         edges++;
       }
     }
   }
 
-  const pixelCount = (cropWidth * cropHeight) / (step * step);
-  const avgR = rTotal / pixelCount;
-  const avgG = gTotal / pixelCount;
-  const avgB = bTotal / pixelCount;
-
-  const [hue, saturation, lightness] = rgbToHsl(avgR, avgG, avgB);
-  const edgeDensity = Math.min(1.0, (edges * step) / (cropWidth * cropHeight));
+  const avgR = count > 0 ? rAcc / count : 128;
+  const avgG = count > 0 ? gAcc / count : 128;
+  const avgB = count > 0 ? bAcc / count : 128;
+  const [h, s, l] = rgbToHsl(avgR, avgG, avgB);
+  
+  const edgeDensity = count > 0 ? edges / count : 0;
+  const aspectRatio = bounds.h > 0 ? bounds.w / bounds.h : 1;
 
   return {
-    aspectRatio: objectAR, // Usa o AR do objeto detectado
-    edgeDensity: edgeDensity,
-    hue: hue,
-    saturation: saturation,
-    brightness: lightness * 255
+    aspectRatio,
+    edgeDensity,
+    hue: h,
+    saturation: s,
+    brightness: l * 255
   };
 };
 
+// Filtro de Nitidez (Sharpen) + Binarização
 const applyOcrFilters = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
-  
-  const contrast = 60; 
-  const factor = (255 + contrast) / (255 * (255 - contrast));
+  const w = width;
+  const h = height;
 
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
-    let newValue = factor * (gray - 128) + 128;
-    
-    if (newValue > 180) newValue = 255; 
-    else if (newValue < 80) newValue = 0; 
-    
-    data[i] = newValue;
-    data[i + 1] = newValue;
-    data[i + 2] = newValue;
+  // 1. Sharpening Kernel
+  //  0 -1  0
+  // -1  5 -1
+  //  0 -1  0
+  const output = new Uint8ClampedArray(data);
+  const kernelWeight = 1; // Center is 5, neighbors -1
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const idx = (y * w + x) * 4;
+      
+      // Aplica apenas na luminância para performance
+      for (let c = 0; c < 3; c++) {
+        const val = 
+          5 * data[idx + c]
+          - data[((y-1)*w + x)*4 + c]
+          - data[((y+1)*w + x)*4 + c]
+          - data[(y*w + (x-1))*4 + c]
+          - data[(y*w + (x+1))*4 + c];
+        
+        output[idx + c] = Math.min(255, Math.max(0, val));
+      }
+      output[idx + 3] = 255; // Alpha
+    }
   }
+
+  // 2. Binarização (Threshold)
+  for (let i = 0; i < output.length; i += 4) {
+    const gray = output[i] * 0.299 + output[i + 1] * 0.587 + output[i + 2] * 0.114;
+    // Threshold simples mas eficaz para texto preto no branco ou vice versa
+    const val = gray > 140 ? 255 : 0;
+    
+    data[i] = val;
+    data[i+1] = val;
+    data[i+2] = val;
+  }
+  
   ctx.putImageData(imageData, 0, 0);
 };
 
+// Inverte cores (para etiquetas pretas)
 const createInvertedImage = (ctx: CanvasRenderingContext2D, width: number, height: number): string => {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
@@ -312,7 +326,7 @@ const createInvertedImage = (ctx: CanvasRenderingContext2D, width: number, heigh
   return tempCanvas.toDataURL('image/jpeg', 0.9);
 };
 
-const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string, invertedUrl: string, features: VisualFeatures }> => {
+const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string, invertedUrl: string, features: VisualFeatures, processedPreview: string }> => {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
@@ -322,31 +336,40 @@ const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string
         resolve({ 
             normalUrl: base64Image, 
             invertedUrl: base64Image,
-            features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 } 
+            features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
+            processedPreview: base64Image
         }); 
         return; 
       }
 
-      canvas.width = img.width * DETECT_CONFIG.SCALE_FACTOR;
-      canvas.height = img.height * DETECT_CONFIG.SCALE_FACTOR;
+      // Redimensiona para processamento
+      canvas.width = img.width > 1200 ? 1200 : img.width; // Cap resolution
+      const scale = canvas.width / img.width;
+      canvas.height = img.height * scale;
       
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       
-      // Feature extraction agora usa detecção de objeto
+      // 1. Extrair Features (Antes de alterar a imagem)
       const features = extractVisualFeatures(ctx, canvas.width, canvas.height);
 
+      // 2. Aplicar Filtros (Destrutivos para OCR)
       applyOcrFilters(ctx, canvas.width, canvas.height);
-      const normalUrl = canvas.toDataURL('image/jpeg', 0.9);
+      const normalUrl = canvas.toDataURL('image/jpeg', 0.8);
+      
+      // Preview para o usuário ver o que o OCR viu
+      const processedPreview = normalUrl;
 
+      // 3. Criar versão invertida
       const invertedUrl = createInvertedImage(ctx, canvas.width, canvas.height);
 
-      resolve({ normalUrl, invertedUrl, features });
+      resolve({ normalUrl, invertedUrl, features, processedPreview });
     };
     
     img.onerror = () => resolve({ 
         normalUrl: base64Image, 
         invertedUrl: base64Image,
-        features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 } 
+        features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
+        processedPreview: base64Image
     });
     
     img.src = `data:image/jpeg;base64,${base64Image}`;
@@ -355,24 +378,26 @@ const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string
 
 const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[]): TrainingExample | null => {
   let bestMatch: TrainingExample | null = null;
-  let minDiff = 0.05; 
+  // Threshold para Match Visual AUTOMÁTICO (tem que ser bem estrito)
+  let minDiff = 0.08; 
 
   for (const example of trainingData) {
     if (!example.features) continue;
     const ef = example.features;
 
-    // Comparação focada em Formato e Textura
-    const diffAR = Math.abs(current.aspectRatio - ef.aspectRatio) / Math.max(current.aspectRatio, ef.aspectRatio);
+    // Normalização das diferenças
+    const diffAR = Math.abs(current.aspectRatio - ef.aspectRatio) / Math.max(0.1, ef.aspectRatio); // Evita div por zero
     const diffED = Math.abs(current.edgeDensity - ef.edgeDensity);
 
+    // Cor (Peso reduzido devido a iluminação)
     const hueDist = Math.min(Math.abs(current.hue - ef.hue), 360 - Math.abs(current.hue - ef.hue));
     const diffHue = hueDist / 180.0;
-    const diffSat = Math.abs(current.saturation - ef.saturation);
-    const diffBri = Math.abs(current.brightness - ef.brightness) / 255.0;
-    const colorScore = (diffHue * 0.6) + (diffSat * 0.2) + (diffBri * 0.2); 
     
-    // Pesos ajustados: AR (60%), ED (30%), Cor (10%)
-    const totalDiff = (diffAR * 0.60) + (diffED * 0.30) + (colorScore * 0.10);
+    // FORMULA PONDERADA:
+    // Aspect Ratio (Formato) é o mais importante: 55%
+    // Edge Density (Textura/Grade): 35%
+    // Hue (Cor): 10% (Baixo para ignorar céu/luz)
+    const totalDiff = (diffAR * 0.55) + (diffED * 0.35) + (diffHue * 0.10);
 
     if (totalDiff < minDiff) {
       minDiff = totalDiff;
@@ -386,50 +411,59 @@ const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[
 export const analyzeLuminaireImage = async (
   base64Image: string,
   trainingData: TrainingExample[]
-): Promise<AnalysisResponse> => {
+): Promise<AnalysisResponse & { processedPreview?: string }> => {
   
-  const { normalUrl, invertedUrl, features } = await preprocessImage(base64Image);
+  const { normalUrl, invertedUrl, features, processedPreview } = await preprocessImage(base64Image);
 
-  // MEMÓRIA VISUAL
+  // 1. Tenta Match Visual
   const visualMatch = findVisualMatch(features, trainingData);
   
   if (visualMatch) {
     return {
       model: visualMatch.model,
       calculatedPower: visualMatch.power,
-      confidence: 0.98,
-      rawText: "Visual Match (Objeto Confirmado)",
-      reasoning: "Reconhecimento Visual: Formato e Textura compatíveis com base de conhecimento.",
-      features: features
+      confidence: 0.95,
+      rawText: "RECONHECIMENTO VISUAL (Geometria + Textura)",
+      reasoning: "Objeto idêntico detectado na base de memória.",
+      features: features,
+      processedPreview: processedPreview
     };
   }
 
+  // 2. Se não achou visualmente, roda OCR
   try {
     const worker = await Tesseract.createWorker('eng');
+    // Whitelist estrita para evitar lixo
     await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:',
-      tessedit_pageseg_mode: '6' as any,
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:Ww',
+      tessedit_pageseg_mode: '6' as any, // Assume bloco de texto uniforme
     });
 
+    // Roda OCR nas duas versões
     const resNormal = await worker.recognize(normalUrl);
     const resInverted = await worker.recognize(invertedUrl);
     await worker.terminate();
 
-    const combinedText = `${resNormal.data.text} | ${resInverted.data.text}`;
-
+    const combinedText = `${resNormal.data.text} \n ${resInverted.data.text}`;
+    
     const result = processExtractedText(combinedText, features, trainingData);
-    result.features = features; 
-    return result;
+    
+    return {
+        ...result,
+        features,
+        processedPreview
+    };
 
   } catch (error) {
     console.error(error);
     return {
       model: null,
-      rawText: "Erro de Leitura",
+      rawText: "Erro OCR",
       calculatedPower: null,
       confidence: 0,
-      reasoning: "Falha OCR",
-      features: features
+      reasoning: "Falha no processamento de imagem.",
+      features: features,
+      processedPreview
     };
   }
 };
@@ -440,14 +474,15 @@ const processExtractedText = (
   trainingData: TrainingExample[]
 ): AnalysisResponse => {
   const cleanText = text.toUpperCase()
-    .replace(/[^A-Z0-9\-\. \/:]/g, ' ')
+    .replace(/[^A-Z0-9\-\. \/:W]/g, ' ') // Mantém W
     .replace(/\s+/g, ' ')
     .trim();
   
   let model: string | null = null;
   let power: number | null = null;
-  let reasoningParts: string[] = [`OCR: "${cleanText.substring(0, 30)}..."`];
+  let reasoningParts: string[] = [];
 
+  // 1. Detectar Modelo
   const knownModels = new Set<string>();
   trainingData.forEach(t => knownModels.add(t.model));
   Object.keys(MODEL_VALID_POWERS).forEach(m => knownModels.add(m));
@@ -455,66 +490,81 @@ const processExtractedText = (
   for (const knownModel of knownModels) {
     if (fuzzyContains(cleanText, knownModel, 2)) {
       model = knownModel;
-      reasoningParts.push(`Texto: ${model}`);
+      reasoningParts.push(`Modelo Texto: ${model}`);
       break;
     }
   }
 
+  // 2. Se não achou modelo, tenta assinaturas de erro
   if (!model) {
     for (const example of trainingData) {
       if (example.ocrSignature && cleanText.includes(example.ocrSignature)) {
         model = example.model;
         if (!power) power = example.power;
-        reasoningParts.push(`Assinatura OCR`);
+        reasoningParts.push(`Assinatura de Erro Conhecida`);
         break;
       }
     }
   }
 
-  const numbers = cleanText.match(/\b\d+\b/g);
-  let bestPowerMatch: number | null = null;
+  // 3. Detectar Potência
+  // Regex aprimorado: Busca "60W", "60 W", ou numeros isolados
+  const powerRegex = /(\d+)\s*[Ww]|(\d{2,3})/g;
+  const matches = [...cleanText.matchAll(powerRegex)];
+  
+  const potentialPowers: number[] = [];
 
-  if (numbers) {
-    const candidates = numbers.map(n => parseInt(n, 10)).filter(val => {
-      return ![110, 127, 220, 230, 240, 380, 2023, 2024, 2025].includes(val);
-    });
-
-    for (const val of candidates) {
-      let candidatePower = val;
-      let appliedRule = false;
-
-      if (val >= 1 && val <= 9) {
-        candidatePower = val * 10;
-        appliedRule = true;
-      }
-
-      if (model && MODEL_VALID_POWERS[model]) {
-        if (MODEL_VALID_POWERS[model].includes(candidatePower)) {
-          bestPowerMatch = candidatePower;
-          reasoningParts.push(appliedRule ? `Regra (x10): ${val}->${candidatePower}W` : `Potência: ${candidatePower}W`);
-          break;
-        }
+  for (const match of matches) {
+      // Grupo 1: 60W (Com W explícito)
+      if (match[1]) {
+          const val = parseInt(match[1], 10);
+          potentialPowers.push(val); // Prioridade alta
       } 
-      else if (candidatePower >= 10 && candidatePower <= 400) {
-        if (!bestPowerMatch || candidatePower > bestPowerMatch) {
-            bestPowerMatch = candidatePower;
-        }
+      // Grupo 2: Apenas números (06, 60, 100)
+      else if (match[2]) {
+          let val = parseInt(match[2], 10);
+          
+          // Filtros de ruído comuns
+          if ([110, 127, 220, 380, 2023, 2024, 2025].includes(val)) continue;
+
+          // REGRA DE CONVERSÃO 01-09 -> x10
+          if (val > 0 && val <= 9) val *= 10;
+          
+          potentialPowers.push(val);
       }
-    }
   }
 
-  if (bestPowerMatch) power = bestPowerMatch;
+  // Validação cruzada com modelo
+  if (model && MODEL_VALID_POWERS[model]) {
+      const validSet = MODEL_VALID_POWERS[model];
+      // Tenta achar um numero que bate com a tabela
+      const validMatch = potentialPowers.find(p => validSet.includes(p));
+      if (validMatch) {
+          power = validMatch;
+          reasoningParts.push(`Potência Validada: ${power}W`);
+      }
+  }
 
-  let confidence = 0.3;
-  if (model && power) confidence = 1.0; 
+  // Fallback: Se não tem modelo ou não bateu, pega o maior valor razoável (<400W)
+  if (!power && potentialPowers.length > 0) {
+      // Filtra valores absurdos para luminárias comuns
+      const reasonable = potentialPowers.filter(p => p >= 10 && p <= 400);
+      if (reasonable.length > 0) {
+          power = Math.max(...reasonable);
+          reasoningParts.push(`Potência Estimada: ${power}W`);
+      }
+  }
+
+  let confidence = 0.2;
+  if (model && power) confidence = 0.95;
   else if (model) confidence = 0.7;
   else if (power) confidence = 0.5;
 
   return {
     model: model,
-    rawText: cleanText,
+    rawText: cleanText.substring(0, 50),
     calculatedPower: power,
     confidence: confidence,
-    reasoning: reasoningParts.join(". ")
+    reasoning: reasoningParts.length > 0 ? reasoningParts.join(". ") : "Dados insuficientes"
   };
 };
