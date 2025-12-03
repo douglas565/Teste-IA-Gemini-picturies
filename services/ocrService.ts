@@ -90,12 +90,12 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   
   let rTotal = 0, gTotal = 0, bTotal = 0;
   let edges = 0;
-  const step = 4; // Amostragem para performance
+  const step = 2; // Passo menor para mais precisão na textura
   const cropWidth = endX - startX;
   const cropHeight = endY - startY;
 
   // Análise de Cor Média e Textura (Edge) no crop central
-  for (let y = 0; y < cropHeight; y += step) {
+  for (let y = 0; y < cropHeight - 1; y += step) {
     for (let x = 0; x < cropWidth - 1; x += step) {
       const i = (y * cropWidth + x) * 4;
       
@@ -104,10 +104,23 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
       gTotal += data[i + 1];
       bTotal += data[i + 2];
 
-      // Detecta Borda (Horizontal simples)
-      const nextI = (y * cropWidth + (x + 1)) * 4;
-      const diff = Math.abs(data[i] - data[nextI]); // Diferença de brilho
-      if (diff > 30) edges++;
+      // Detecta Borda (Gradiente Horizontal e Vertical)
+      // Converte para escala de cinza para comparar brilho
+      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+      
+      const iRight = (y * cropWidth + (x + 1)) * 4;
+      const grayRight = data[iRight] * 0.299 + data[iRight+1] * 0.587 + data[iRight+2] * 0.114;
+
+      const iDown = ((y + 1) * cropWidth + x) * 4;
+      const grayDown = data[iDown] * 0.299 + data[iDown+1] * 0.587 + data[iDown+2] * 0.114;
+
+      const diffH = Math.abs(gray - grayRight);
+      const diffV = Math.abs(gray - grayDown);
+
+      // Threshold de borda ajustado para capturar detalhes da luminária
+      if (diffH > 20 || diffV > 20) {
+        edges++;
+      }
     }
   }
 
@@ -119,7 +132,7 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   // Calcula HSL
   const [hue, saturation, lightness] = rgbToHsl(avgR, avgG, avgB);
 
-  // Calcula Densidade de Borda
+  // Calcula Densidade de Borda Normalizada
   const edgeDensity = Math.min(1.0, (edges * step) / (cropWidth * cropHeight));
 
   return {
@@ -222,36 +235,39 @@ const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string
   });
 };
 
-// --- MATCHING VISUAL PONDERADO ---
+// --- MATCHING VISUAL PONDERADO (CLASSIFY VISUAL) ---
 const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[]): TrainingExample | null => {
   let bestMatch: TrainingExample | null = null;
   
-  // Limite super estrito para "Auto Match" (5% de diferença global)
+  // Limite estrito para "Auto Match"
   let minDiff = 0.05; 
 
   for (const example of trainingData) {
     if (!example.features) continue;
     const ef = example.features;
 
-    // 1. Diferença de Aspect Ratio (Formato) - PESO MÁXIMO (50%)
+    // 1. Diferença de Aspect Ratio (Formato) - PRIORIDADE MÁXIMA
+    // Luminárias diferentes costumam ter formatos diferentes (Quadrada vs Retangular vs Comprida)
     const diffAR = Math.abs(current.aspectRatio - ef.aspectRatio) / Math.max(current.aspectRatio, ef.aspectRatio);
 
-    // 2. Diferença de Textura (Edge) - PESO ALTO (35%)
+    // 2. Diferença de Textura (Edge Density) - PRIORIDADE ALTA
+    // Diferencia gradeada, lisa, com aletas, etc.
     const diffED = Math.abs(current.edgeDensity - ef.edgeDensity);
 
-    // 3. Diferença de Cor (Hue) - PESO BAIXO (15%) - Reduzido para evitar ruído de luz do dia
+    // 3. Diferença de Cor (Hue) - PRIORIDADE BAIXA
+    // Reduzida para evitar falsos negativos causados por iluminação do dia (céu azul vs nublado)
     const hueDist = Math.min(Math.abs(current.hue - ef.hue), 360 - Math.abs(current.hue - ef.hue));
     const diffHue = hueDist / 180.0;
     
-    // Auxiliares de Cor
     const diffSat = Math.abs(current.saturation - ef.saturation);
     const diffBri = Math.abs(current.brightness - ef.brightness) / 255.0;
-
     const colorScore = (diffHue * 0.6) + (diffSat * 0.2) + (diffBri * 0.2); 
     
-    // Score Final Rebalanceado
-    // AR(0.50) + Texture(0.35) + Color(0.15)
-    const totalDiff = (diffAR * 0.50) + (diffED * 0.35) + (colorScore * 0.15);
+    // SCORE FINAL REBALANCEADO
+    // Aspect Ratio: 60%
+    // Edge Density: 30%
+    // Color: 10%
+    const totalDiff = (diffAR * 0.60) + (diffED * 0.30) + (colorScore * 0.10);
 
     if (totalDiff < minDiff) {
       minDiff = totalDiff;
