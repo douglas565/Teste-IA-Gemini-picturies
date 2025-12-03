@@ -15,10 +15,18 @@ export interface TrainingExample {
   visualDescription?: string; // Optional context about what was seen
 }
 
-// Response structure expected from Gemini
+// Response structure for the internal OCR service
+export interface AnalysisResponse {
+  model: string | null;
+  rawText: string;
+  calculatedPower: number | null;
+  confidence: number;
+  reasoning: string;
+}
+
 export interface GeminiResponse {
   model: string | null;
-  rawLabelNumber: string | null; // The number found on the label (e.g., "06" or "100")
+  rawLabelNumber: string | null;
   calculatedPower: number | null;
   confidence: number;
   reasoning: string;

@@ -1,5 +1,5 @@
 {
-  "name": "LumiScan AI",
-  "description": "Intelligent luminaire recognition system with self-learning capabilities. Detects model and power based on label rules using Gemini Vision.",
+  "name": "LumiScan Offline",
+  "description": "Sistema de reconhecimento de luminárias 100% gratuito e offline usando OCR no navegador.",
   "requestFramePermissions": []
 }
