@@ -19,7 +19,7 @@ const App: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const CONFIDENCE_THRESHOLD = 0.70;
+  const CONFIDENCE_THRESHOLD = 0.85; // Aumentei para garantir qualidade automática
 
   // --- PERSISTÊNCIA ---
   useEffect(() => {
@@ -45,14 +45,13 @@ const App: React.FC = () => {
       if (queue.length === 0 || isProcessingQueue) return;
 
       setIsProcessingQueue(true);
-      const file = queue[0]; // Pega o primeiro
+      const file = queue[0];
       
       try {
         await processFile(file);
       } catch (error) {
         console.error("Erro ao processar arquivo da fila:", file.name, error);
       } finally {
-        // Remove o arquivo processado da fila e continua
         setQueue(prev => prev.slice(1));
         setProcessedCount(prev => prev + 1);
         setIsProcessingQueue(false);
@@ -72,6 +71,7 @@ const App: React.FC = () => {
         const base64String = reader.result as string;
         const base64Data = base64String.split(',')[1];
 
+        // Passamos o trainingData atualizado para que ele use as novas regras imediatamente
         const analysisResponse = await analyzeLuminaireImage(base64Data, trainingData);
 
         const isLowConfidence = analysisResponse.confidence < CONFIDENCE_THRESHOLD;
@@ -92,7 +92,7 @@ const App: React.FC = () => {
         setHistory(prev => [newResult, ...prev]);
         resolve();
       };
-      reader.onerror = () => resolve(); // Resolve mesmo com erro para não travar a fila
+      reader.onerror = () => resolve();
     });
   };
 
@@ -100,13 +100,9 @@ const App: React.FC = () => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
 
-    // Adiciona arquivos à fila
     const newFiles = Array.from(files);
     setQueue(prev => [...prev, ...newFiles]);
-    
-    // Reseta contador se for um novo lote
     if (queue.length === 0) setProcessedCount(0);
-
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -116,7 +112,6 @@ const App: React.FC = () => {
   };
 
   const saveCorrection = (id: string, correctedModel: string, correctedPower: number) => {
-    // Pega o item original para obter o rawText (assinatura do erro)
     const originalItem = history.find(h => h.id === id);
     const errorSignature = originalItem?.rawText || "";
 
@@ -125,7 +120,7 @@ const App: React.FC = () => {
       if (item.id === id) {
         return {
           ...item,
-          model: correctedModel,
+          model: correctedModel.toUpperCase(),
           power: correctedPower,
           status: 'confirmed',
           confidence: 1.0,
@@ -135,19 +130,20 @@ const App: React.FC = () => {
       return item;
     }));
 
-    // 2. APRENDIZADO INTELIGENTE
-    // Salva não só o modelo, mas o TEXTO ERRADO que o OCR leu.
-    // Assim, se ele ler errado de novo, ele saberá o que significa.
+    // 2. APRENDIZADO INTELIGENTE (Generalização)
+    // Adicionamos uma nova regra. O 'analyzeLuminaireImage' agora usa Fuzzy Match
+    // então basta adicionar o modelo à base de conhecimento.
     const newExample: TrainingExample = {
       model: correctedModel.toUpperCase(),
       power: correctedPower,
-      ocrSignature: errorSignature.slice(0, 50) // Usa o texto cru como chave de aprendizado
+      ocrSignature: errorSignature // Guarda o erro para caso o Fuzzy falhe
     };
     
     setTrainingData(prev => {
-       // Se já existe uma regra para essa assinatura exata, atualiza. Se não, adiciona.
-       const others = prev.filter(p => p.ocrSignature !== newExample.ocrSignature);
-       return [...others, newExample];
+       // Mantemos todas as regras anteriores para aumentar a "bolsa de palavras" conhecida
+       // mas evitamos duplicatas exatas de assinatura
+       const unique = prev.filter(p => p.ocrSignature !== newExample.ocrSignature);
+       return [...unique, newExample];
     });
 
     setIsModalOpen(false);
@@ -165,7 +161,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row">
-      {/* Sidebar */}
       <aside className="w-full md:w-64 bg-slate-900 text-white p-6 flex flex-col md:fixed md:h-full z-10">
         <div className="flex items-center gap-3 mb-8">
            <div className="w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/30">
@@ -175,12 +170,11 @@ const App: React.FC = () => {
            </div>
            <div>
              <h1 className="text-xl font-bold tracking-tight leading-none">LumiScan</h1>
-             <span className="text-[10px] text-green-400 font-mono">AUTOMATIC BATCH</span>
+             <span className="text-[10px] text-green-400 font-mono">AUTO LEARNING</span>
            </div>
         </div>
 
         <div className="space-y-6 flex-1">
-          {/* Status do Batch */}
           {isWorking && (
             <div className="bg-indigo-900/50 p-4 rounded-lg border border-indigo-500/30 animate-pulse">
               <h3 className="text-xs uppercase text-indigo-300 font-bold mb-1">Processando Lote</h3>
@@ -207,16 +201,12 @@ const App: React.FC = () => {
         </div>
       </aside>
 
-      {/* Main Content */}
       <main className="flex-1 md:ml-64 p-4 md:p-8 overflow-y-auto">
-        
-        {/* Header Action Area */}
         <div className="max-w-6xl mx-auto mb-8">
            <div className="bg-white rounded-2xl shadow-lg border border-indigo-50 p-6 md:p-8 text-center relative overflow-hidden">
-              
-              <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Processamento em Massa</h2>
+              <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Reconhecimento em Massa</h2>
               <p className="text-slate-500 mb-8 max-w-xl mx-auto relative z-10 text-sm md:text-base">
-                Selecione até 1500 imagens de uma vez. O sistema aprenderá automaticamente com suas correções.
+                O sistema aprende com suas correções. Carregue uma pasta inteira.
               </p>
 
               <div className="flex justify-center relative z-10">
@@ -224,7 +214,7 @@ const App: React.FC = () => {
                   type="file" 
                   ref={fileInputRef}
                   accept="image/*"
-                  multiple // Permite seleção múltipla
+                  multiple 
                   onChange={handleFileUpload}
                   className="hidden" 
                   id="imageUpload"
@@ -239,7 +229,7 @@ const App: React.FC = () => {
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
-                      <span>Processando Fila...</span>
+                      <span>Analisando...</span>
                     </>
                   ) : (
                     <>
@@ -254,7 +244,6 @@ const App: React.FC = () => {
            </div>
         </div>
 
-        {/* Results Grid */}
         <div className="max-w-6xl mx-auto">
           {history.length > 0 && (
             <div className="flex items-center justify-between mb-4">
@@ -284,13 +273,12 @@ const App: React.FC = () => {
                  </svg>
                </div>
                <h3 className="text-slate-900 font-medium mb-1">Aguardando Imagens</h3>
-               <p className="text-slate-500 text-sm max-w-xs mx-auto">Carregue centenas de imagens de uma vez. O sistema processará automaticamente.</p>
+               <p className="text-slate-500 text-sm max-w-xs mx-auto">Carregue centenas de imagens. O sistema aprende padrões automaticamente.</p>
             </div>
           )}
         </div>
       </main>
 
-      {/* Modal */}
       <CorrectionModal 
         isOpen={isModalOpen}
         data={itemToEdit}
