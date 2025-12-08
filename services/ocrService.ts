@@ -105,7 +105,7 @@ const MODEL_VALID_POWERS: Record<string, number[]> = {
 
 const DETECT_CONFIG = {
   SCALE_FACTOR: 1.5, 
-  MIN_BLOB_PERCENT: 0.005 
+  MIN_BLOB_PERCENT: 0.08 // 8% da imagem (Aumentado para ignorar luzes distantes)
 };
 
 // --- UTILS: FUZZY MATCHING ---
@@ -171,8 +171,9 @@ const rgbToHsl = (r: number, g: number, b: number) => {
 
 const isSkyPixel = (r: number, g: number, b: number) => {
   const [h, s, l] = rgbToHsl(r, g, b);
-  if (l > 0.85) return true;
-  if (h > 170 && h < 270 && s > 0.15 && l > 0.4) return true;
+  // Definição mais rigorosa de céu para não pegar luminárias cinza claro
+  if (l > 0.90) return true; // Branco estourado
+  if (h > 180 && h < 260 && s > 0.15 && l > 0.45) return true; // Azul do céu
   return false;
 };
 
@@ -183,6 +184,10 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
   const scanStep = 8; 
 
   const getIdx = (x: number, y: number) => y * width + x;
+
+  // Pontos totais verificados
+  const totalScannedPoints = (width * height) / (scanStep * scanStep);
+  const minAreaThreshold = totalScannedPoints * DETECT_CONFIG.MIN_BLOB_PERCENT;
 
   for (let y = 0; y < height; y += scanStep) {
     for (let x = 0; x < width; x += scanStep) {
@@ -248,9 +253,13 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
   }
 
   const validBlobs = blobs.filter(b => {
-    if (b.area < (width * height / (scanStep*scanStep)) * 0.01) return false;
+    // 1. Filtro de Área: Ignora objetos muito pequenos (longe)
+    if (b.area < minAreaThreshold) return false;
+    
+    // 2. Filtro de Formato: Ignora objetos muito finos (Postes verticais)
     const ar = b.w / b.h;
-    if (ar > 5.0 || ar < 0.1) return false;
+    if (ar > 4.0 || ar < 0.35) return false; // < 0.35 remove postes verticais finos
+    
     return true;
   });
 
