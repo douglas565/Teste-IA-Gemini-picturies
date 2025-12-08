@@ -1,6 +1,5 @@
 import Tesseract from 'tesseract.js';
 import { AnalysisResponse, TrainingExample, VisualFeatures, DetectionResult } from "../types";
-import { analyzeLuminaireImage as analyzeWithGemini } from './geminiService';
 
 // --- TABELAS DE REFERÊNCIA (STRICT) ---
 const MODEL_VALID_POWERS: Record<string, number[]> = {
@@ -598,7 +597,7 @@ export const analyzeLuminaireImage = async (
   const { match: visualMatch, diff: visualDiff } = findVisualMatch(features, trainingData);
   const isExactDuplicate = visualMatch && visualDiff < 0.05;
 
-  // Se for duplicata exata, confiamos 100% no local e retornamos rápido (sem gastar AI)
+  // Se for duplicata exata, confiamos 100% no local e retornamos rápido
   if (isExactDuplicate && visualMatch) {
       return {
           model: visualMatch.model,
@@ -648,38 +647,6 @@ export const analyzeLuminaireImage = async (
 
       } catch (error) {
         console.error("OCR Local falhou", error);
-      }
-  }
-
-  // 4. Decisão Híbrida: Acionar Gemini?
-  // Aciona se: Confiança local baixa OU Faltando Modelo/Potência
-  const needsAI = localResult.confidence < 0.9 || !localResult.model || !localResult.calculatedPower;
-
-  if (needsAI) {
-      try {
-          // Chama Gemini com a imagem ORIGINAL (Full Resolution)
-          // Isso ajuda muito em luminárias distantes onde o crop local pode ter falhado
-          const geminiResult = await analyzeWithGemini(base64Image, trainingData);
-
-          // Se Gemini tiver confiança decente, fazemos o merge
-          if (geminiResult.confidence > 0.4) {
-              // Prioriza Gemini para leitura, mas mantém modelo visual se Gemini não achou modelo
-              const finalModel = geminiResult.model || localResult.model;
-              const finalPower = geminiResult.calculatedPower || localResult.calculatedPower;
-              
-              // Se Gemini achou potência e local não, ou se Gemini tem alta confiança
-              return {
-                  model: finalModel,
-                  rawText: geminiResult.rawLabelNumber ? `AI: ${geminiResult.rawLabelNumber}` : localResult.rawText,
-                  calculatedPower: finalPower,
-                  confidence: geminiResult.confidence, // Confiança da IA geralmente é mais calibrada
-                  reasoning: `🤖 AI: ${geminiResult.reasoning}`,
-                  features: features,
-                  processedPreview: processedPreview
-              };
-          }
-      } catch (err) {
-          console.error("Erro ao consultar Gemini:", err);
       }
   }
 
