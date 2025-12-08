@@ -160,7 +160,17 @@ const CATALOG_DATA = [
 
 const App: React.FC = () => {
   const [history, setHistory] = useState<DetectionResult[]>([]);
-  const [trainingData, setTrainingData] = useState<TrainingExample[]>([]);
+  
+  // Inicialização Preguiçosa para garantir carregamento síncrono do localStorage
+  const [trainingData, setTrainingData] = useState<TrainingExample[]>(() => {
+    try {
+      const saved = localStorage.getItem('lumiscan_training_data');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      console.error("Erro ao carregar dados salvos", e);
+      return [];
+    }
+  });
   
   // Fila de Processamento
   const [queue, setQueue] = useState<File[]>([]);
@@ -176,22 +186,10 @@ const App: React.FC = () => {
 
   const CONFIDENCE_THRESHOLD = 0.85;
 
-  // --- PERSISTÊNCIA ---
+  // --- PERSISTÊNCIA ROBUSTA ---
+  // Salva sempre que houver alteração, sem condições de tamanho, garantindo sincronia.
   useEffect(() => {
-    const savedTraining = localStorage.getItem('lumiscan_training_data');
-    if (savedTraining) {
-      try {
-        setTrainingData(JSON.parse(savedTraining));
-      } catch (e) {
-        console.error("Erro ao carregar dados salvos", e);
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    if (trainingData.length > 0) {
-      localStorage.setItem('lumiscan_training_data', JSON.stringify(trainingData));
-    }
+    localStorage.setItem('lumiscan_training_data', JSON.stringify(trainingData));
   }, [trainingData]);
 
   // --- PROCESSAMENTO DE FILA (LOTE) ---
@@ -307,7 +305,7 @@ const App: React.FC = () => {
   const clearMemory = () => {
     if(confirm("Tem certeza que deseja apagar todo o aprendizado?")) {
       setTrainingData([]);
-      localStorage.removeItem('lumiscan_training_data');
+      // localStorage será atualizado automaticamente pelo useEffect
     }
   };
 
