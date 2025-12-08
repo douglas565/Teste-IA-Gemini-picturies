@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect } from 'react';
-import { analyzeLuminaireImage, checkRetrospectiveMatch } from './services/ocrService';
+import { analyzeLuminaireImage, checkRetrospectiveMatch, selectBestImageFromBatch } from './services/ocrService';
 import { DetectionResult, TrainingExample } from './types';
 import ResultCard from './components/ResultCard';
 import CorrectionModal from './components/CorrectionModal';
@@ -160,6 +160,11 @@ const CATALOG_DATA = [
   },
 ];
 
+interface ProcessingJob {
+  id: string; // Ponto ID (Nome da Pasta)
+  files: File[];
+}
+
 const App: React.FC = () => {
   const [history, setHistory] = useState<DetectionResult[]>([]);
   
@@ -174,8 +179,8 @@ const App: React.FC = () => {
     }
   });
   
-  // Fila de Processamento
-  const [queue, setQueue] = useState<File[]>([]);
+  // Fila de Processamento por JOB (Pasta)
+  const [queue, setQueue] = useState<ProcessingJob[]>([]);
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
   const [processedCount, setProcessedCount] = useState(0);
   
@@ -203,12 +208,12 @@ const App: React.FC = () => {
       if (queue.length === 0 || isProcessingQueue) return;
 
       setIsProcessingQueue(true);
-      const file = queue[0];
+      const job = queue[0];
       
       try {
-        await processFile(file);
+        await processJob(job);
       } catch (error) {
-        console.error("Erro ao processar arquivo da fila:", file.name, error);
+        console.error("Erro ao processar job da fila:", job.id, error);
       } finally {
         setQueue(prev => prev.slice(1));
         setProcessedCount(prev => prev + 1);
@@ -221,10 +226,13 @@ const App: React.FC = () => {
     }
   }, [queue, isProcessingQueue]);
 
-  const processFile = (file: File): Promise<void> => {
-    return new Promise((resolve) => {
+  const processJob = async (job: ProcessingJob) => {
+    // 1. Seleciona a melhor imagem do lote
+    const bestFile = await selectBestImageFromBatch(job.files);
+
+    return new Promise<void>((resolve) => {
       const reader = new FileReader();
-      reader.readAsDataURL(file);
+      reader.readAsDataURL(bestFile);
       reader.onload = async () => {
         const base64String = reader.result as string;
         const base64Data = base64String.split(',')[1];
@@ -237,7 +245,8 @@ const App: React.FC = () => {
 
         const newResult: DetectionResult = {
           id: Date.now().toString() + Math.random().toString().slice(2, 6),
-          fileName: file.name, // Nome do arquivo original
+          pointId: job.id, // Nome da pasta
+          fileName: bestFile.name, // Nome do arquivo original
           timestamp: Date.now(),
           imageUrl: base64String,
           model: analysisResponse.model,
@@ -260,8 +269,32 @@ const App: React.FC = () => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
 
-    const newFiles = Array.from(files);
-    setQueue(prev => [...prev, ...newFiles]);
+    // Agrupar arquivos por pasta (Ponto ID)
+    const groups: Record<string, File[]> = {};
+    
+    Array.from(files).forEach(file => {
+      // webkitRelativePath formato: "PastaPai/Arquivo.jpg"
+      // Se for upload direto de arquivo sem pasta, usa o nome do arquivo (fallback)
+      const path = file.webkitRelativePath || file.name;
+      const parts = path.split('/');
+      
+      // Se tiver pasta, o ID é o nome da pasta pai. Se não, é 'Raiz'.
+      // Ex: "PONTO_01/img1.jpg" -> id = "PONTO_01"
+      const groupId = parts.length > 1 ? parts[parts.length - 2] : "Upload Geral";
+      
+      if (!groups[groupId]) {
+        groups[groupId] = [];
+      }
+      groups[groupId].push(file);
+    });
+
+    // Converter grupos em Jobs
+    const newJobs: ProcessingJob[] = Object.keys(groups).map(id => ({
+      id,
+      files: groups[id]
+    }));
+
+    setQueue(prev => [...prev, ...newJobs]);
     if (queue.length === 0) setProcessedCount(0);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
@@ -385,8 +418,9 @@ const App: React.FC = () => {
       return;
     }
 
-    const headers = ["ID (Foto)", "MODELO", "POTENCIA (W)", "CONFIABILIDADE"];
+    const headers = ["PONTO", "ARQUIVO", "MODELO", "POTENCIA (W)", "CONFIABILIDADE"];
     const rows = history.map(item => [
+      item.pointId || "N/A",
       item.fileName || item.id,
       item.model || "DESCONHECIDO",
       item.power || 0,
@@ -428,7 +462,7 @@ const App: React.FC = () => {
             <div className="bg-indigo-900/50 p-4 rounded-lg border border-indigo-500/30 animate-pulse">
               <h3 className="text-xs uppercase text-indigo-300 font-bold mb-1">Processando Lote</h3>
               <div className="text-2xl font-bold text-white">{processedCount} / {processedCount + queue.length}</div>
-              <p className="text-xs text-indigo-400">Imagens na fila...</p>
+              <p className="text-xs text-indigo-400">Pontos na fila...</p>
             </div>
           )}
 
@@ -486,7 +520,7 @@ const App: React.FC = () => {
            <div className="bg-white rounded-2xl shadow-lg border border-indigo-50 p-6 md:p-8 text-center relative overflow-hidden">
               <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Reconhecimento em Massa</h2>
               <p className="text-slate-500 mb-8 max-w-xl mx-auto relative z-10 text-sm md:text-base">
-                O sistema prioriza a etiqueta, mas usa a memória visual quando a etiqueta falha.
+                Selecione a pasta raiz com as subpastas dos pontos. O sistema escolherá automaticamente a melhor foto de cada ponto.
               </p>
 
               <div className="flex justify-center relative z-10">
@@ -494,7 +528,9 @@ const App: React.FC = () => {
                   type="file" 
                   ref={fileInputRef}
                   accept="image/*"
-                  multiple 
+                  // @ts-ignore
+                  webkitdirectory="" 
+                  multiple
                   onChange={handleFileUpload}
                   className="hidden" 
                   id="imageUpload"
@@ -516,7 +552,7 @@ const App: React.FC = () => {
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                       </svg>
-                      <span className="font-semibold text-lg">Carregar Pasta / Imagens</span>
+                      <span className="font-semibold text-lg">Selecionar Pasta / Fotos</span>
                     </>
                   )}
                 </label>
@@ -568,7 +604,7 @@ const App: React.FC = () => {
                     </svg>
                   </div>
                   <h3 className="text-slate-900 font-medium mb-1">Aguardando Imagens</h3>
-                  <p className="text-slate-500 text-sm max-w-xs mx-auto">Carregue centenas de imagens. O sistema aprende padrões automaticamente.</p>
+                  <p className="text-slate-500 text-sm max-w-xs mx-auto">Carregue pastas de imagens. O sistema agrupa por ponto e escolhe a melhor foto.</p>
                </div>
 
                {/* Catálogo */}

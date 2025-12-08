@@ -22,6 +22,16 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, onEdit, onImageClick }) =
         </div>
       )}
       
+      {/* HEADER DO CARD COM O PONTO */}
+      <div className="bg-slate-50 px-4 py-2 border-b border-gray-100 flex justify-between items-center rounded-t-xl">
+         <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+           PONTO: {item.pointId || "Upload Geral"}
+         </span>
+         <span className="text-[10px] text-gray-400 font-mono">
+           {new Date(item.timestamp).toLocaleTimeString()}
+         </span>
+      </div>
+      
       <div className="flex p-4 gap-4">
         {/* Image Thumbnail */}
         <div 
@@ -49,14 +59,14 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, onEdit, onImageClick }) =
         <div className="flex-1 min-w-0">
           <div className="flex justify-between items-start">
             <div>
-              <h4 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Modelo</h4>
-              <p className="text-lg font-bold text-gray-900 truncate">
+              <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider">Modelo</h4>
+              <p className="text-base font-bold text-gray-900 truncate leading-tight">
                 {item.model || <span className="text-red-400 italic">Desconhecido</span>}
               </p>
             </div>
             <div className="text-right">
-               <h4 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Potência</h4>
-               <p className="text-lg font-bold text-indigo-600">
+               <h4 className="text-xs font-medium text-gray-400 uppercase tracking-wider">Potência</h4>
+               <p className="text-base font-bold text-indigo-600 leading-tight">
                  {item.power ? `${item.power}W` : <span className="text-red-400 italic">--</span>}
                </p>
             </div>
@@ -72,7 +82,7 @@ const ResultCard: React.FC<ResultCardProps> = ({ item, onEdit, onImageClick }) =
                </div>
                <span className="text-xs text-gray-400 font-mono">{(item.confidence * 100).toFixed(0)}% Conf.</span>
              </div>
-             <p className="text-xs text-gray-500 line-clamp-1 italic">
+             <p className="text-[10px] text-gray-500 line-clamp-1 italic">
                "{item.reasoning}"
              </p>
           </div>

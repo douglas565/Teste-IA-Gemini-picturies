@@ -1,3 +1,4 @@
+
 import Tesseract from 'tesseract.js';
 import { AnalysisResponse, TrainingExample, VisualFeatures, DetectionResult } from "../types";
 
@@ -173,9 +174,8 @@ const rgbToHsl = (r: number, g: number, b: number) => {
 
 const isSkyPixel = (r: number, g: number, b: number) => {
   const [h, s, l] = rgbToHsl(r, g, b);
-  // Definição mais rigorosa de céu para não pegar luminárias cinza claro
-  if (l > 0.90) return true; // Branco estourado
-  if (h > 180 && h < 260 && s > 0.15 && l > 0.45) return true; // Azul do céu
+  if (l > 0.90) return true; 
+  if (h > 180 && h < 260 && s > 0.15 && l > 0.45) return true; 
   return false;
 };
 
@@ -255,18 +255,12 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
   }
 
   const validBlobs = blobs.filter(b => {
-    // 1. Filtro de Área: Ignora objetos muito pequenos (ruído extremo)
     if (b.area < minAreaThreshold) return false;
-    
-    // 2. Filtro de Formato: Ignora postes puros (muito verticais)
-    // Relaxado para 0.35 para aceitar cabeças de luminárias inclinadas
     const ar = b.w / b.h;
     if (ar > 5.0 || ar < 0.35) return false; 
-    
     return true;
   });
 
-  // FALLBACK FIXO: Retorna o centro se falhar, mas com confiança zero depois
   if (validBlobs.length === 0) {
     const marginW = Math.floor(width * 0.25); 
     const marginH = Math.floor(height * 0.25);
@@ -275,7 +269,8 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
         y: marginH, 
         w: width - (marginW * 2), 
         h: height - (marginH * 2),
-        isFallback: true 
+        isFallback: true,
+        area: 0
     };
   }
 
@@ -288,12 +283,12 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
     y: Math.max(0, best.y - padding),
     w: Math.min(width - best.x + padding * 2, best.w + padding * 2),
     h: Math.min(height - best.y + padding * 2, best.h + padding * 2),
-    isFallback: false
+    isFallback: false,
+    area: best.area
   };
 };
 
 const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, height: number, bounds: any): VisualFeatures => {
-  // 1. Extração no Objeto Detectado (Para Formato e Textura)
   const imageData = ctx.getImageData(bounds.x, bounds.y, bounds.w, bounds.h);
   const data = imageData.data;
   
@@ -305,7 +300,6 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
     for (let x = 0; x < bounds.w - step; x += step) {
       const i = (y * bounds.w + x) * 4;
       const r = data[i], g = data[i+1], b = data[i+2];
-      
       const lum = 0.299*r + 0.587*g + 0.114*b;
       
       const iRight = (y * bounds.w + (x + step)) * 4;
@@ -324,7 +318,6 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   const edgeDensity = count > 0 ? edges / count : 0;
   const aspectRatio = bounds.h > 0 ? bounds.w / bounds.h : 1;
 
-  // 2. Extração Global Estável (Centro Fixo da Imagem Original)
   const centerW = Math.floor(width * 0.4);
   const centerH = Math.floor(height * 0.4);
   const startX = Math.floor((width - centerW) / 2);
@@ -354,7 +347,6 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   };
 };
 
-// Filtro de Nitidez (Sharpen) + Binarização
 const applyOcrFilters = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
@@ -407,18 +399,15 @@ const createInvertedImage = (ctx: CanvasRenderingContext2D, width: number, heigh
   return tempCanvas.toDataURL('image/jpeg', 0.9);
 };
 
-// Função auxiliar para cortar e dar zoom na luminária se ela for pequena (distante)
 const cropAndUpscale = (
   ctx: CanvasRenderingContext2D, 
   bounds: {x: number, y: number, w: number, h: number},
   fullWidth: number,
   fullHeight: number
 ): { normalUrl: string, invertedUrl: string } => {
-  
   const cropCanvas = document.createElement('canvas');
   const cropCtx = cropCanvas.getContext('2d');
   
-  // Se a luminária for menor que 30% da imagem (distante), fazemos upscaling
   const isSmall = (bounds.w * bounds.h) < (fullWidth * fullHeight * 0.3);
   const scale = isSmall ? 2.5 : 1.0;
 
@@ -428,14 +417,12 @@ const cropAndUpscale = (
   if (cropCtx) {
     cropCtx.imageSmoothingEnabled = true;
     cropCtx.imageSmoothingQuality = 'high';
-    // Desenha apenas a parte detectada, com zoom se necessário
     cropCtx.drawImage(
       ctx.canvas, 
       bounds.x, bounds.y, bounds.w, bounds.h, 
       0, 0, cropCanvas.width, cropCanvas.height
     );
 
-    // Aplica filtros no recorte
     applyOcrFilters(cropCtx, cropCanvas.width, cropCanvas.height);
     
     const normalUrl = cropCanvas.toDataURL('image/jpeg', 0.9);
@@ -445,6 +432,74 @@ const cropAndUpscale = (
   
   return { normalUrl: '', invertedUrl: '' };
 };
+
+// --- SELEÇÃO DE MELHOR IMAGEM (BEST SHOT) ---
+const calculateImageScore = async (file: File): Promise<number> => {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if(!ctx) { resolve(0); return; }
+
+        // Redimensiona para análise rápida (max 800px)
+        const maxDim = 800;
+        let w = img.width;
+        let h = img.height;
+        if(w > maxDim || h > maxDim) {
+            const r = Math.min(maxDim/w, maxDim/h);
+            w = Math.floor(w*r);
+            h = Math.floor(h*r);
+        }
+        canvas.width = w;
+        canvas.height = h;
+        ctx.drawImage(img, 0, 0, w, h);
+        
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const bounds = detectObjectBounds(imageData.data, w, h);
+        
+        // Se for fallback (não achou objeto), score é zero
+        if(bounds.isFallback) {
+          resolve(0);
+          return;
+        }
+
+        // Score base: Área do objeto (Zoom) tem peso 70%
+        // Nitidez (Edge Density) tem peso 30%
+        const objectAreaRatio = (bounds.w * bounds.h) / (w * h);
+        const features = extractVisualFeatures(ctx, w, h, bounds);
+        
+        const score = (objectAreaRatio * 0.7) + (features.edgeDensity * 0.3);
+        resolve(score);
+      };
+      img.onerror = () => resolve(0);
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => resolve(0);
+    reader.readAsDataURL(file);
+  });
+};
+
+export const selectBestImageFromBatch = async (files: File[]): Promise<File> => {
+  if (files.length === 0) throw new Error("Batch vazio");
+  if (files.length === 1) return files[0];
+
+  let bestFile = files[0];
+  let maxScore = -1;
+
+  for (const file of files) {
+    const score = await calculateImageScore(file);
+    if (score > maxScore) {
+      maxScore = score;
+      bestFile = file;
+    }
+  }
+  return bestFile;
+};
+
+// --- PROCESSAMENTO PRINCIPAL ---
 
 const preprocessImage = async (base64Image: string): Promise<{ 
   normalUrl: string, 
@@ -469,8 +524,6 @@ const preprocessImage = async (base64Image: string): Promise<{
         return; 
       }
 
-      // 1. Manter alta resolução para permitir leitura de longe
-      // Aumentado para 2000px de largura
       const maxDim = DETECT_CONFIG.MAX_WIDTH;
       let width = img.width;
       let height = img.height;
@@ -487,14 +540,8 @@ const preprocessImage = async (base64Image: string): Promise<{
       ctx.drawImage(img, 0, 0, width, height);
       const fullImageData = ctx.getImageData(0, 0, width, height);
 
-      // 2. Detectar Onde está a luminária
       const bounds = detectObjectBounds(fullImageData.data, width, height);
-      
-      // 3. Extrair Features do objeto detectado
       const features = extractVisualFeatures(ctx, width, height, bounds);
-
-      // 4. Recorte Inteligente (Smart Crop) + Upscale (Zoom Digital)
-      // Em vez de enviar a imagem toda cheia de céu, enviamos só o recorte ampliado
       const { normalUrl, invertedUrl } = cropAndUpscale(ctx, bounds, width, height);
 
       resolve({ 
@@ -526,20 +573,15 @@ export const findVisualMatch = (current: VisualFeatures, trainingData: TrainingE
     if (!example.features) continue;
     const ef = example.features;
 
-    // Normalização das Diferenças
     const diffAR = Math.abs(current.aspectRatio - ef.aspectRatio) / Math.max(0.1, ef.aspectRatio);
     const diffED = Math.abs(current.edgeDensity - ef.edgeDensity);
     
-    // Diferença de Cor (Circular)
     const hueDist = Math.min(Math.abs(current.hue - ef.hue), 360 - Math.abs(current.hue - ef.hue));
     const diffHue = hueDist / 180.0;
     
-    // Diferença de Brilho/Saturação (Crítico para imagens idênticas)
     const diffBright = Math.abs(current.brightness - ef.brightness) / 255.0;
     const diffSat = Math.abs(current.saturation - ef.saturation);
     
-    // Peso Balanceado: Prioriza Formato e Textura para encontrar MODELOS similares
-    // Reduz importância de cor e brilho que variam com a luz do dia
     const totalDiff = 
         (diffAR * 0.45) + 
         (diffED * 0.35) + 
@@ -556,23 +598,16 @@ export const findVisualMatch = (current: VisualFeatures, trainingData: TrainingE
   return { match: bestMatch, diff: minDiff };
 };
 
-// Função para re-verificar itens do histórico baseado em um novo aprendizado
 export const checkRetrospectiveMatch = (item: DetectionResult, rule: TrainingExample): boolean => {
-    // 1. Checagem Visual
     if (item.features && rule.features) {
-        // Usa a mesma lógica de findVisualMatch, mas para um único item
         const { diff } = findVisualMatch(item.features, [rule]);
-        // Tolerância de 15% para retrospectiva (seguro o suficiente para mesmo modelo)
         if (diff < 0.15) {
             return true;
         }
     }
-
-    // 2. Checagem de Assinatura de Texto (OCR Error Matching)
     if (rule.ocrSignature && item.rawText && item.rawText.includes(rule.ocrSignature)) {
         return true;
     }
-
     return false;
 };
 
@@ -581,26 +616,20 @@ export const analyzeLuminaireImage = async (
   trainingData: TrainingExample[]
 ): Promise<AnalysisResponse & { processedPreview?: string }> => {
   
-  // 1. Processamento Local (Visual + OCR)
   const { normalUrl, invertedUrl, features, processedPreview, isFallback } = await preprocessImage(base64Image);
 
-  // Inicializa resultado local
   let localResult: AnalysisResponse = {
       model: null,
       rawText: isFallback ? "Objeto Distante" : "",
       calculatedPower: null,
-      confidence: isFallback ? 0.1 : 0, // Confiança baixa se for fallback
+      confidence: isFallback ? 0.1 : 0, 
       reasoning: isFallback ? "Local: Objeto muito pequeno ou distante." : "",
       features: features
   };
 
-  // 2. Busca Match Visual (Memória)
-  // diff < 0.05: Duplicata Exata
-  // diff < 0.20: Luminária Similar (Mesmo modelo, ângulo/luz diferente)
   const { match: visualMatch, diff: visualDiff } = findVisualMatch(features, trainingData);
   const isExactDuplicate = visualMatch && visualDiff < 0.05;
 
-  // Se for duplicata EXATA, confiamos 100% no local e retornamos rápido
   if (isExactDuplicate && visualMatch) {
       return {
           model: visualMatch.model,
@@ -613,7 +642,6 @@ export const analyzeLuminaireImage = async (
       };
   }
 
-  // 3. Tenta OCR Local (PRIORIDADE 1)
   if (!isFallback) {
       try {
         const worker = await Tesseract.createWorker('eng');
@@ -627,25 +655,17 @@ export const analyzeLuminaireImage = async (
         await worker.terminate();
 
         const combinedText = `${resNormal.data.text} \n ${resInverted.data.text}`;
-        
-        // Processa texto localmente
         const processedOcr = processExtractedText(combinedText, features, trainingData);
         
-        // Atualiza resultado com o que o OCR encontrou
         localResult = {
             ...processedOcr,
             features, 
             reasoning: "OCR: " + processedOcr.reasoning
         };
         
-        // 4. CRUZAMENTO DE DADOS (Cross-Referencing)
-        // Se encontramos uma luminária visualmente similar (diff < 0.20), usamos ela para 
-        // preencher lacunas ou confirmar o modelo, mas NUNCA para sobrescrever uma potência lida claramente.
-        
         if (visualMatch && visualDiff < 0.20) {
              const similarity = ((1 - visualDiff) * 100).toFixed(0);
              
-             // CASO A: OCR achou Modelo e Potência -> Ótimo, o visual só confirma.
              if (localResult.model && localResult.calculatedPower) {
                  if (localResult.model === visualMatch.model) {
                      localResult.confidence = Math.max(localResult.confidence, 0.95);
@@ -653,17 +673,13 @@ export const analyzeLuminaireImage = async (
                  }
              }
              
-             // CASO B: OCR falhou no Modelo -> Usa o modelo visual.
              if (!localResult.model) {
                  localResult.model = visualMatch.model;
                  localResult.confidence = Math.max(localResult.confidence, 0.70);
                  localResult.reasoning += ` | Modelo sugerido por similaridade visual (${similarity}%).`;
              }
 
-             // CASO C: OCR achou Modelo mas falhou na Potência -> Usa potência do visual.
-             // Ex: Etiqueta rasgada onde só lê "PALLAS".
              if (localResult.model && !localResult.calculatedPower) {
-                 // Verifica se o modelo visual é o mesmo que o OCR leu parcialmente
                  if (localResult.model === visualMatch.model || !localResult.model) {
                      localResult.calculatedPower = visualMatch.power;
                      localResult.confidence = Math.max(localResult.confidence, 0.80);
@@ -671,18 +687,16 @@ export const analyzeLuminaireImage = async (
                  }
              }
 
-             // CASO D: OCR falhou totalmente -> Usa estimativa visual com cautela.
              if (!localResult.model && !localResult.calculatedPower) {
                   localResult.model = visualMatch.model;
                   localResult.calculatedPower = visualMatch.power;
-                  localResult.confidence = 0.60; // Confiança média, pede revisão
+                  localResult.confidence = 0.60; 
                   localResult.reasoning = `Estimativa baseada puramente em similaridade visual (${similarity}%). Verificar etiqueta.`;
              }
         }
 
       } catch (error) {
         console.error("OCR Local falhou", error);
-        // Fallback total para visual se OCR quebrar
         if (visualMatch && visualDiff < 0.20) {
             localResult.model = visualMatch.model;
             localResult.calculatedPower = visualMatch.power;
@@ -709,7 +723,6 @@ const processExtractedText = (
   let power: number | null = null;
   let reasoningParts: string[] = [];
 
-  // 1. Detectar Modelo
   const knownModels = new Set<string>();
   trainingData.forEach(t => knownModels.add(t.model));
   Object.keys(MODEL_VALID_POWERS).forEach(m => knownModels.add(m));
@@ -722,7 +735,6 @@ const processExtractedText = (
     }
   }
 
-  // 2. Assinatura de erro
   if (!model) {
     for (const example of trainingData) {
       if (example.ocrSignature && cleanText.includes(example.ocrSignature)) {
@@ -734,7 +746,6 @@ const processExtractedText = (
     }
   }
 
-  // 3. Detectar Potência
   const powerRegex = /(\d+)\s*[Ww]|(\d{2,3})/g;
   const matches = [...cleanText.matchAll(powerRegex)];
   const potentialPowers: number[] = [];
@@ -752,7 +763,6 @@ const processExtractedText = (
       }
   }
 
-  // Validação Cruzada Modelo vs Potência Encontrada
   if (model && MODEL_VALID_POWERS[model]) {
       const validSet = MODEL_VALID_POWERS[model];
       const validMatch = potentialPowers.find(p => validSet.includes(p));
@@ -762,11 +772,10 @@ const processExtractedText = (
       }
   }
 
-  // Se não validou na tabela, pega o valor mais razoável que parece potência
   if (!power && potentialPowers.length > 0) {
       const reasonable = potentialPowers.filter(p => p >= 10 && p <= 400);
       if (reasonable.length > 0) {
-          power = Math.max(...reasonable); // Assume a maior potência plausível encontrada
+          power = Math.max(...reasonable); 
           reasoningParts.push(`Potência Lida na Etiqueta: ${power}W`);
       }
   }

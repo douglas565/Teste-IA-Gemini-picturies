@@ -1,3 +1,4 @@
+
 export interface VisualFeatures {
   aspectRatio: number;
   edgeDensity: number;
@@ -8,7 +9,8 @@ export interface VisualFeatures {
 
 export interface DetectionResult {
   id: string;
-  fileName?: string; // Nome original do arquivo para o relatório
+  pointId?: string; // Nome da Pasta / Ponto de Iluminação
+  fileName?: string; // Nome do arquivo escolhido
   timestamp: number;
   imageUrl: string;
   model: string | null;
