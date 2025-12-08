@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { analyzeLuminaireImage } from './services/ocrService';
+import { analyzeLuminaireImage, checkRetrospectiveMatch } from './services/ocrService';
 import { DetectionResult, TrainingExample } from './types';
 import ResultCard from './components/ResultCard';
 import CorrectionModal from './components/CorrectionModal';
@@ -271,8 +271,17 @@ const App: React.FC = () => {
     const errorSignature = originalItem?.rawText || "";
     const visualFeatures = originalItem?.features; 
 
-    // 1. Atualizar histórico visual
+    // 1. Criar novo exemplo de treinamento
+    const newExample: TrainingExample = {
+      model: correctedModel.toUpperCase(),
+      power: correctedPower,
+      ocrSignature: errorSignature,
+      features: visualFeatures 
+    };
+
+    // 2. Atualizar histórico (Item Atual + RECHECAGEM RETROATIVA)
     setHistory(prev => prev.map(item => {
+      // Atualiza o item que está sendo editado
       if (item.id === id) {
         return {
           ...item,
@@ -283,17 +292,24 @@ const App: React.FC = () => {
           reasoning: "Validado e aprendido pelo usuário."
         };
       }
+      
+      // Rechecagem inteligente: Se o item ainda não foi confirmado ou tem baixa confiança,
+      // verifica se ele "casa" com o novo padrão que acabamos de aprender.
+      if (item.status !== 'confirmed' && checkRetrospectiveMatch(item, newExample)) {
+          return {
+              ...item,
+              model: correctedModel.toUpperCase(),
+              power: correctedPower,
+              status: 'confirmed',
+              confidence: 1.0,
+              reasoning: "Atualizado automaticamente por similaridade com correção recente."
+          };
+      }
+
       return item;
     }));
 
-    // 2. APRENDIZADO INTELIGENTE (Visual + Texto)
-    const newExample: TrainingExample = {
-      model: correctedModel.toUpperCase(),
-      power: correctedPower,
-      ocrSignature: errorSignature,
-      features: visualFeatures 
-    };
-    
+    // 3. Salvar no banco de treinamento
     setTrainingData(prev => {
        return [...prev, newExample];
     });

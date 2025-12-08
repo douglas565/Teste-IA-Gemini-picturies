@@ -1,5 +1,5 @@
 import Tesseract from 'tesseract.js';
-import { AnalysisResponse, TrainingExample, VisualFeatures } from "../types";
+import { AnalysisResponse, TrainingExample, VisualFeatures, DetectionResult } from "../types";
 
 // --- TABELAS DE REFERÊNCIA (STRICT) ---
 const MODEL_VALID_POWERS: Record<string, number[]> = {
@@ -444,7 +444,7 @@ const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string
   });
 };
 
-const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[]): { match: TrainingExample | null, diff: number } => {
+export const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[]): { match: TrainingExample | null, diff: number } => {
   let bestMatch: TrainingExample | null = null;
   let minDiff = 1.0; 
 
@@ -479,6 +479,26 @@ const findVisualMatch = (current: VisualFeatures, trainingData: TrainingExample[
   }
 
   return { match: bestMatch, diff: minDiff };
+};
+
+// Função para re-verificar itens do histórico baseado em um novo aprendizado
+export const checkRetrospectiveMatch = (item: DetectionResult, rule: TrainingExample): boolean => {
+    // 1. Checagem Visual
+    if (item.features && rule.features) {
+        // Usa a mesma lógica de findVisualMatch, mas para um único item
+        const { diff } = findVisualMatch(item.features, [rule]);
+        // Tolerância de 10% para retrospectiva (seguro o suficiente para mesmo modelo)
+        if (diff < 0.10) {
+            return true;
+        }
+    }
+
+    // 2. Checagem de Assinatura de Texto (OCR Error Matching)
+    if (rule.ocrSignature && item.rawText && item.rawText.includes(rule.ocrSignature)) {
+        return true;
+    }
+
+    return false;
 };
 
 export const analyzeLuminaireImage = async (
