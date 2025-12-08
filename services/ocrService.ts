@@ -538,13 +538,14 @@ export const findVisualMatch = (current: VisualFeatures, trainingData: TrainingE
     const diffBright = Math.abs(current.brightness - ef.brightness) / 255.0;
     const diffSat = Math.abs(current.saturation - ef.saturation);
     
-    // Peso Balanceado: Formato é importante, mas Brilho e Cor confirmam identidade
+    // Peso Balanceado: Prioriza Formato e Textura para encontrar MODELOS similares
+    // Reduz importância de cor e brilho que variam com a luz do dia
     const totalDiff = 
-        (diffAR * 0.40) + 
-        (diffED * 0.30) + 
+        (diffAR * 0.45) + 
+        (diffED * 0.35) + 
         (diffHue * 0.10) +
-        (diffBright * 0.10) +
-        (diffSat * 0.10);
+        (diffBright * 0.05) +
+        (diffSat * 0.05);
 
     if (totalDiff < minDiff) {
       minDiff = totalDiff;
@@ -561,8 +562,8 @@ export const checkRetrospectiveMatch = (item: DetectionResult, rule: TrainingExa
     if (item.features && rule.features) {
         // Usa a mesma lógica de findVisualMatch, mas para um único item
         const { diff } = findVisualMatch(item.features, [rule]);
-        // Tolerância de 10% para retrospectiva (seguro o suficiente para mesmo modelo)
-        if (diff < 0.10) {
+        // Tolerância de 15% para retrospectiva (seguro o suficiente para mesmo modelo)
+        if (diff < 0.15) {
             return true;
         }
     }
@@ -594,23 +595,25 @@ export const analyzeLuminaireImage = async (
   };
 
   // 2. Busca Match Visual (Memória)
+  // diff < 0.05: Duplicata Exata
+  // diff < 0.20: Luminária Similar (Mesmo modelo, ângulo/luz diferente)
   const { match: visualMatch, diff: visualDiff } = findVisualMatch(features, trainingData);
   const isExactDuplicate = visualMatch && visualDiff < 0.05;
 
-  // Se for duplicata exata, confiamos 100% no local e retornamos rápido
+  // Se for duplicata EXATA, confiamos 100% no local e retornamos rápido
   if (isExactDuplicate && visualMatch) {
       return {
           model: visualMatch.model,
-          rawText: "Memória Visual",
+          rawText: "Duplicata Exata",
           calculatedPower: visualMatch.power,
           confidence: 1.0,
-          reasoning: "Local: Reconhecido na Memória Visual (Duplicata).",
+          reasoning: "Reconhecido na Memória Visual (Duplicata Exata).",
           features: features,
           processedPreview: processedPreview
       };
   }
 
-  // 3. Tenta OCR Local se não for fallback
+  // 3. Tenta OCR Local (PRIORIDADE 1)
   if (!isFallback) {
       try {
         const worker = await Tesseract.createWorker('eng');
@@ -628,25 +631,64 @@ export const analyzeLuminaireImage = async (
         // Processa texto localmente
         const processedOcr = processExtractedText(combinedText, features, trainingData);
         
-        // Se achou algo bom localmente, atualiza localResult
-        if (processedOcr.confidence > localResult.confidence) {
-            localResult = {
-                ...processedOcr,
-                features, // mantém features
-                reasoning: "Local: " + processedOcr.reasoning
-            };
-        }
+        // Atualiza resultado com o que o OCR encontrou
+        localResult = {
+            ...processedOcr,
+            features, 
+            reasoning: "OCR: " + processedOcr.reasoning
+        };
         
-        // Merge com visual match se for forte (>90%)
-        if (visualMatch && visualDiff < 0.15) {
-             if (!localResult.model) localResult.model = visualMatch.model;
-             if (!localResult.calculatedPower) localResult.calculatedPower = visualMatch.power;
-             localResult.confidence = Math.max(localResult.confidence, 0.8);
-             localResult.reasoning += " + Visual Similar.";
+        // 4. CRUZAMENTO DE DADOS (Cross-Referencing)
+        // Se encontramos uma luminária visualmente similar (diff < 0.20), usamos ela para 
+        // preencher lacunas ou confirmar o modelo, mas NUNCA para sobrescrever uma potência lida claramente.
+        
+        if (visualMatch && visualDiff < 0.20) {
+             const similarity = ((1 - visualDiff) * 100).toFixed(0);
+             
+             // CASO A: OCR achou Modelo e Potência -> Ótimo, o visual só confirma.
+             if (localResult.model && localResult.calculatedPower) {
+                 if (localResult.model === visualMatch.model) {
+                     localResult.confidence = Math.max(localResult.confidence, 0.95);
+                     localResult.reasoning += ` | Confirmado visualmente (${similarity}% similar).`;
+                 }
+             }
+             
+             // CASO B: OCR falhou no Modelo -> Usa o modelo visual.
+             if (!localResult.model) {
+                 localResult.model = visualMatch.model;
+                 localResult.confidence = Math.max(localResult.confidence, 0.70);
+                 localResult.reasoning += ` | Modelo sugerido por similaridade visual (${similarity}%).`;
+             }
+
+             // CASO C: OCR achou Modelo mas falhou na Potência -> Usa potência do visual.
+             // Ex: Etiqueta rasgada onde só lê "PALLAS".
+             if (localResult.model && !localResult.calculatedPower) {
+                 // Verifica se o modelo visual é o mesmo que o OCR leu parcialmente
+                 if (localResult.model === visualMatch.model || !localResult.model) {
+                     localResult.calculatedPower = visualMatch.power;
+                     localResult.confidence = Math.max(localResult.confidence, 0.80);
+                     localResult.reasoning += ` | Potência estimada por padrão visual similar (${similarity}%).`;
+                 }
+             }
+
+             // CASO D: OCR falhou totalmente -> Usa estimativa visual com cautela.
+             if (!localResult.model && !localResult.calculatedPower) {
+                  localResult.model = visualMatch.model;
+                  localResult.calculatedPower = visualMatch.power;
+                  localResult.confidence = 0.60; // Confiança média, pede revisão
+                  localResult.reasoning = `Estimativa baseada puramente em similaridade visual (${similarity}%). Verificar etiqueta.`;
+             }
         }
 
       } catch (error) {
         console.error("OCR Local falhou", error);
+        // Fallback total para visual se OCR quebrar
+        if (visualMatch && visualDiff < 0.20) {
+            localResult.model = visualMatch.model;
+            localResult.calculatedPower = visualMatch.power;
+            localResult.confidence = 0.5;
+            localResult.reasoning = "OCR Falhou. Sugestão visual.";
+        }
       }
   }
 
@@ -675,7 +717,7 @@ const processExtractedText = (
   for (const knownModel of knownModels) {
     if (fuzzyContains(cleanText, knownModel, 2)) {
       model = knownModel;
-      reasoningParts.push(`Modelo Texto: ${model}`);
+      reasoningParts.push(`Modelo Identificado: ${model}`);
       break;
     }
   }
@@ -710,26 +752,28 @@ const processExtractedText = (
       }
   }
 
+  // Validação Cruzada Modelo vs Potência Encontrada
   if (model && MODEL_VALID_POWERS[model]) {
       const validSet = MODEL_VALID_POWERS[model];
       const validMatch = potentialPowers.find(p => validSet.includes(p));
       if (validMatch) {
           power = validMatch;
-          reasoningParts.push(`Potência Validada: ${power}W`);
+          reasoningParts.push(`Potência Validada na Tabela: ${power}W`);
       }
   }
 
+  // Se não validou na tabela, pega o valor mais razoável que parece potência
   if (!power && potentialPowers.length > 0) {
       const reasonable = potentialPowers.filter(p => p >= 10 && p <= 400);
       if (reasonable.length > 0) {
-          power = Math.max(...reasonable);
-          reasoningParts.push(`Potência Estimada: ${power}W`);
+          power = Math.max(...reasonable); // Assume a maior potência plausível encontrada
+          reasoningParts.push(`Potência Lida na Etiqueta: ${power}W`);
       }
   }
 
   let confidence = 0.2;
-  if (model && power) confidence = 0.95;
-  else if (model) confidence = 0.7;
+  if (model && power) confidence = 0.90;
+  else if (model) confidence = 0.6;
   else if (power) confidence = 0.5;
 
   return {
