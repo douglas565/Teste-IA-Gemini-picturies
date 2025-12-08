@@ -105,7 +105,7 @@ const MODEL_VALID_POWERS: Record<string, number[]> = {
 
 const DETECT_CONFIG = {
   SCALE_FACTOR: 1.5, 
-  MIN_BLOB_PERCENT: 0.08 // 8% da imagem (Aumentado para ignorar luzes distantes)
+  MIN_BLOB_PERCENT: 0.12 // Aumentado para 12% da imagem (Ignora objetos muito distantes)
 };
 
 // --- UTILS: FUZZY MATCHING ---
@@ -258,7 +258,7 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
     
     // 2. Filtro de Formato: Ignora objetos muito finos (Postes verticais)
     const ar = b.w / b.h;
-    if (ar > 4.0 || ar < 0.35) return false; // < 0.35 remove postes verticais finos
+    if (ar > 4.0 || ar < 0.45) return false; // Aumentado para 0.45: Ignora postes, foca em caixas de luminárias
     
     return true;
   });
@@ -516,6 +516,21 @@ export const analyzeLuminaireImage = async (
 ): Promise<AnalysisResponse & { processedPreview?: string }> => {
   
   const { normalUrl, invertedUrl, features, processedPreview } = await preprocessImage(base64Image);
+
+  // --- FILTRO DE OBJETOS INVÁLIDOS (POSTES/LONGE) ---
+  // Se o Aspect Ratio for menor que 0.40, é muito provável que seja um poste vertical
+  // ou uma imagem que o detector não conseguiu recortar bem.
+  if (features.aspectRatio < 0.40) {
+      return {
+          model: null,
+          rawText: "Ignorado",
+          calculatedPower: null,
+          confidence: 0,
+          reasoning: "Ignorado: Imagem parece ser um poste ou estar muito distante (Muito vertical/fina).",
+          features: features,
+          processedPreview: processedPreview
+      };
+  }
 
   // 1. Busca Match Visual PRIMEIRO (Para detectar duplicatas exatas)
   const { match: visualMatch, diff: visualDiff } = findVisualMatch(features, trainingData);
