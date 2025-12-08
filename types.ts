@@ -8,6 +8,7 @@ export interface VisualFeatures {
 
 export interface DetectionResult {
   id: string;
+  fileName?: string; // Nome original do arquivo para o relatório
   timestamp: number;
   imageUrl: string;
   model: string | null;

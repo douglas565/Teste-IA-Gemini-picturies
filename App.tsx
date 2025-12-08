@@ -234,6 +234,7 @@ const App: React.FC = () => {
 
         const newResult: DetectionResult = {
           id: Date.now().toString() + Math.random().toString().slice(2, 6),
+          fileName: file.name, // Nome do arquivo original
           timestamp: Date.now(),
           imageUrl: base64String,
           model: analysisResponse.model,
@@ -270,7 +271,6 @@ const App: React.FC = () => {
   const saveCorrection = (id: string, correctedModel: string, correctedPower: number) => {
     const originalItem = history.find(h => h.id === id);
     const errorSignature = originalItem?.rawText || "";
-    // CRUCIAL: Captura as features visuais (incluindo cor e brilho)
     const visualFeatures = originalItem?.features; 
 
     // 1. Atualizar histórico visual
@@ -293,11 +293,10 @@ const App: React.FC = () => {
       model: correctedModel.toUpperCase(),
       power: correctedPower,
       ocrSignature: errorSignature,
-      features: visualFeatures // Salva a "cara" da luminária para reconhecimento visual futuro
+      features: visualFeatures 
     };
     
     setTrainingData(prev => {
-       // Mantemos a base crescendo para melhorar a precisão
        return [...prev, newExample];
     });
 
@@ -342,8 +341,6 @@ const App: React.FC = () => {
       try {
         const json = JSON.parse(e.target?.result as string);
         if (Array.isArray(json)) {
-          // Merge com dados existentes, evitando duplicatas exatas se possível, 
-          // mas por segurança apenas concatenamos e o usuário gerencia.
           setTrainingData(prev => [...prev, ...json]);
           alert(`${json.length} registros de memória importados com sucesso!`);
         } else {
@@ -356,6 +353,34 @@ const App: React.FC = () => {
     };
     reader.readAsText(file);
     if (jsonInputRef.current) jsonInputRef.current.value = '';
+  };
+
+  // --- EXPORTAR RELATÓRIO EXCEL (CSV) ---
+  const exportToExcel = () => {
+    if (history.length === 0) {
+      alert("Não há resultados para exportar.");
+      return;
+    }
+
+    const headers = ["ID (Foto)", "MODELO", "POTENCIA (W)", "CONFIABILIDADE"];
+    const rows = history.map(item => [
+      item.fileName || item.id,
+      item.model || "DESCONHECIDO",
+      item.power || 0,
+      (item.confidence * 100).toFixed(0) + "%"
+    ]);
+
+    // Usando ; como separador para compatibilidade com Excel em PT-BR e BOM para UTF-8
+    const csvContent = "\uFEFF" + [headers.join(";"), ...rows.map(e => e.join(";"))].join("\n");
+    
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `relatorio_luminarias_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const isWorking = queue.length > 0 || isProcessingQueue;
@@ -478,12 +503,23 @@ const App: React.FC = () => {
 
         <div className="max-w-6xl mx-auto">
           {history.length > 0 && (
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
               <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                 Resultados
                 <span className="text-xs font-normal text-slate-500 bg-slate-200 px-2 py-0.5 rounded-full">{history.length}</span>
               </h3>
-              <button onClick={() => setHistory([])} className="text-xs text-red-500 hover:underline">Limpar Tudo</button>
+              <div className="flex gap-3">
+                <button 
+                    onClick={exportToExcel} 
+                    className="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-md flex items-center gap-1 transition-colors"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    Baixar Excel (CSV)
+                </button>
+                <button onClick={() => setHistory([])} className="text-xs text-red-500 hover:underline">Limpar Tudo</button>
+              </div>
             </div>
           )}
 
