@@ -1,8 +1,10 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { analyzeLuminaireImage, checkRetrospectiveMatch } from './services/ocrService';
 import { DetectionResult, TrainingExample } from './types';
 import ResultCard from './components/ResultCard';
 import CorrectionModal from './components/CorrectionModal';
+import ImageZoomModal from './components/ImageZoomModal';
 
 // --- DADOS DO CATÁLOGO DE REFERÊNCIA (PDF) ---
 const CATALOG_DATA = [
@@ -181,6 +183,9 @@ const App: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [itemToEdit, setItemToEdit] = useState<DetectionResult | null>(null);
 
+  // Zoom Modal State
+  const [zoomedImage, setZoomedImage] = useState<string | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const jsonInputRef = useRef<HTMLInputElement>(null);
 
@@ -264,6 +269,10 @@ const App: React.FC = () => {
   const handleManualEdit = (item: DetectionResult) => {
     setItemToEdit(item);
     setIsModalOpen(true);
+  };
+
+  const handleImageZoom = (imageUrl: string) => {
+    setZoomedImage(imageUrl);
   };
 
   const saveCorrection = (id: string, correctedModel: string, correctedPower: number) => {
@@ -543,6 +552,7 @@ const App: React.FC = () => {
                  key={item.id} 
                  item={item} 
                  onEdit={handleManualEdit}
+                 onImageClick={handleImageZoom}
                />
              ))}
           </div>
@@ -600,6 +610,12 @@ const App: React.FC = () => {
           setIsModalOpen(false);
           setItemToEdit(null);
         }}
+      />
+
+      <ImageZoomModal 
+        isOpen={!!zoomedImage}
+        imageUrl={zoomedImage}
+        onClose={() => setZoomedImage(null)}
       />
     </div>
   );
