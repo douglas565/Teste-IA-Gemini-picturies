@@ -1,5 +1,6 @@
 import Tesseract from 'tesseract.js';
 import { AnalysisResponse, TrainingExample, VisualFeatures, DetectionResult } from "../types";
+import { analyzeLuminaireImage as analyzeWithGemini } from './geminiService';
 
 // --- TABELAS DE REFERÊNCIA (STRICT) ---
 const MODEL_VALID_POWERS: Record<string, number[]> = {
@@ -580,93 +581,109 @@ export const analyzeLuminaireImage = async (
   trainingData: TrainingExample[]
 ): Promise<AnalysisResponse & { processedPreview?: string }> => {
   
+  // 1. Processamento Local (Visual + OCR)
   const { normalUrl, invertedUrl, features, processedPreview, isFallback } = await preprocessImage(base64Image);
 
-  // --- FILTRO DE OBJETOS INVÁLIDOS (POSTES/LONGE) ---
-  // Se o objeto for extremamente pequeno E o Aspect Ratio for de poste, ignoramos.
-  // Se detectObjectBounds retornou fallback (centro), significa que não achou nada relevante.
-  if (isFallback) {
+  // Inicializa resultado local
+  let localResult: AnalysisResponse = {
+      model: null,
+      rawText: isFallback ? "Objeto Distante" : "",
+      calculatedPower: null,
+      confidence: isFallback ? 0.1 : 0, // Confiança baixa se for fallback
+      reasoning: isFallback ? "Local: Objeto muito pequeno ou distante." : "",
+      features: features
+  };
+
+  // 2. Busca Match Visual (Memória)
+  const { match: visualMatch, diff: visualDiff } = findVisualMatch(features, trainingData);
+  const isExactDuplicate = visualMatch && visualDiff < 0.05;
+
+  // Se for duplicata exata, confiamos 100% no local e retornamos rápido (sem gastar AI)
+  if (isExactDuplicate && visualMatch) {
       return {
-          model: null,
-          rawText: "Muito Distante",
-          calculatedPower: null,
-          confidence: 0,
-          reasoning: "Ignorado: Objeto muito pequeno ou distante para leitura confiável.",
+          model: visualMatch.model,
+          rawText: "Memória Visual",
+          calculatedPower: visualMatch.power,
+          confidence: 1.0,
+          reasoning: "Local: Reconhecido na Memória Visual (Duplicata).",
           features: features,
           processedPreview: processedPreview
       };
   }
 
-  // 1. Busca Match Visual PRIMEIRO (Para detectar duplicatas exatas)
-  const { match: visualMatch, diff: visualDiff } = findVisualMatch(features, trainingData);
-  
-  // Se for uma cópia EXATA (ou muito próxima) de algo treinado, usamos a memória.
-  // 0.05 é uma tolerância muito baixa, indicando praticamente a mesma imagem.
-  const isExactDuplicate = visualMatch && visualDiff < 0.05;
+  // 3. Tenta OCR Local se não for fallback
+  if (!isFallback) {
+      try {
+        const worker = await Tesseract.createWorker('eng');
+        await worker.setParameters({
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:Ww',
+          tessedit_pageseg_mode: '6' as any,
+        });
 
-  let ocrResult: AnalysisResponse | null = null;
-  
-  // Só roda OCR se não for uma duplicata óbvia, ou se quisermos confirmar
-  try {
-    const worker = await Tesseract.createWorker('eng');
-    await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:Ww',
-      tessedit_pageseg_mode: '6' as any, // 6 = Assume block of text (bom para o crop)
-    });
+        const resNormal = await worker.recognize(normalUrl);
+        const resInverted = await worker.recognize(invertedUrl);
+        await worker.terminate();
 
-    const resNormal = await worker.recognize(normalUrl);
-    const resInverted = await worker.recognize(invertedUrl);
-    await worker.terminate();
+        const combinedText = `${resNormal.data.text} \n ${resInverted.data.text}`;
+        
+        // Processa texto localmente
+        const processedOcr = processExtractedText(combinedText, features, trainingData);
+        
+        // Se achou algo bom localmente, atualiza localResult
+        if (processedOcr.confidence > localResult.confidence) {
+            localResult = {
+                ...processedOcr,
+                features, // mantém features
+                reasoning: "Local: " + processedOcr.reasoning
+            };
+        }
+        
+        // Merge com visual match se for forte (>90%)
+        if (visualMatch && visualDiff < 0.15) {
+             if (!localResult.model) localResult.model = visualMatch.model;
+             if (!localResult.calculatedPower) localResult.calculatedPower = visualMatch.power;
+             localResult.confidence = Math.max(localResult.confidence, 0.8);
+             localResult.reasoning += " + Visual Similar.";
+        }
 
-    const combinedText = `${resNormal.data.text} \n ${resInverted.data.text}`;
-    
-    ocrResult = processExtractedText(combinedText, features, trainingData);
-  } catch (error) {
-    console.error("OCR falhou", error);
-  }
-
-  // 3. Cruzamento e Decisão
-  let finalModel = ocrResult?.model || null;
-  let finalPower = ocrResult?.calculatedPower || null;
-  let finalConfidence = ocrResult?.confidence || 0;
-  let finalReasoning = ocrResult?.reasoning || "";
-
-  if (isExactDuplicate && visualMatch) {
-      if (finalPower && finalPower !== visualMatch.power) {
-          finalReasoning = `Atenção: Visual idêntico, mas OCR leu potência diferente.`;
-          finalConfidence = 0.85; 
-      } else {
-          finalModel = visualMatch.model;
-          finalPower = visualMatch.power;
-          finalConfidence = 1.0;
-          finalReasoning = "Luminária Reconhecida na Memória Visual.";
-      }
-  } else if (visualMatch && visualDiff < 0.15) {
-      if (!finalModel) {
-          finalModel = visualMatch.model;
-          finalReasoning += ` | Modelo sugerido por similaridade visual (${(visualDiff*100).toFixed(1)}%).`;
-          finalConfidence = Math.max(finalConfidence, 0.75);
-      }
-      if (!finalPower) {
-          finalPower = visualMatch.power;
-          finalReasoning += ` | Potência sugerida por similaridade.`;
+      } catch (error) {
+        console.error("OCR Local falhou", error);
       }
   }
 
-  if (!finalModel && !finalPower && !visualMatch) {
-      finalConfidence = 0;
-      finalReasoning = "Não identificado. Distante ou sem etiqueta legível.";
+  // 4. Decisão Híbrida: Acionar Gemini?
+  // Aciona se: Confiança local baixa OU Faltando Modelo/Potência
+  const needsAI = localResult.confidence < 0.9 || !localResult.model || !localResult.calculatedPower;
+
+  if (needsAI) {
+      try {
+          // Chama Gemini com a imagem ORIGINAL (Full Resolution)
+          // Isso ajuda muito em luminárias distantes onde o crop local pode ter falhado
+          const geminiResult = await analyzeWithGemini(base64Image, trainingData);
+
+          // Se Gemini tiver confiança decente, fazemos o merge
+          if (geminiResult.confidence > 0.4) {
+              // Prioriza Gemini para leitura, mas mantém modelo visual se Gemini não achou modelo
+              const finalModel = geminiResult.model || localResult.model;
+              const finalPower = geminiResult.calculatedPower || localResult.calculatedPower;
+              
+              // Se Gemini achou potência e local não, ou se Gemini tem alta confiança
+              return {
+                  model: finalModel,
+                  rawText: geminiResult.rawLabelNumber ? `AI: ${geminiResult.rawLabelNumber}` : localResult.rawText,
+                  calculatedPower: finalPower,
+                  confidence: geminiResult.confidence, // Confiança da IA geralmente é mais calibrada
+                  reasoning: `🤖 AI: ${geminiResult.reasoning}`,
+                  features: features,
+                  processedPreview: processedPreview
+              };
+          }
+      } catch (err) {
+          console.error("Erro ao consultar Gemini:", err);
+      }
   }
 
-  return {
-    model: finalModel,
-    rawText: ocrResult ? ocrResult.rawText : "OCR Ignorado",
-    calculatedPower: finalPower,
-    confidence: finalConfidence,
-    reasoning: finalReasoning,
-    features: features,
-    processedPreview: processedPreview
-  };
+  return { ...localResult, processedPreview };
 };
 
 const processExtractedText = (
