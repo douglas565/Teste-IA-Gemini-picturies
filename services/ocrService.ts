@@ -104,8 +104,10 @@ const MODEL_VALID_POWERS: Record<string, number[]> = {
 };
 
 const DETECT_CONFIG = {
-  SCALE_FACTOR: 1.5, 
-  MIN_BLOB_PERCENT: 0.12 // Aumentado para 12% da imagem (Ignora objetos muito distantes)
+  // Aumentado para 2000px para permitir leitura de objetos distantes
+  MAX_WIDTH: 2000, 
+  // Reduzido para 1.5%: Permite detectar luminárias distantes, mas o filtro AR remove ruído
+  MIN_BLOB_PERCENT: 0.015 
 };
 
 // --- UTILS: FUZZY MATCHING ---
@@ -253,26 +255,27 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
   }
 
   const validBlobs = blobs.filter(b => {
-    // 1. Filtro de Área: Ignora objetos muito pequenos (longe)
+    // 1. Filtro de Área: Ignora objetos muito pequenos (ruído extremo)
     if (b.area < minAreaThreshold) return false;
     
-    // 2. Filtro de Formato: Ignora objetos muito finos (Postes verticais)
+    // 2. Filtro de Formato: Ignora postes puros (muito verticais)
+    // Relaxado para 0.35 para aceitar cabeças de luminárias inclinadas
     const ar = b.w / b.h;
-    if (ar > 4.0 || ar < 0.45) return false; // Aumentado para 0.45: Ignora postes, foca em caixas de luminárias
+    if (ar > 5.0 || ar < 0.35) return false; 
     
     return true;
   });
 
-  // FALLBACK FIXO: Retorna o centro da imagem se a detecção falhar.
-  // Garante consistência para imagens duplicadas.
+  // FALLBACK FIXO: Retorna o centro se falhar, mas com confiança zero depois
   if (validBlobs.length === 0) {
-    const marginW = Math.floor(width * 0.15); 
-    const marginH = Math.floor(height * 0.15);
+    const marginW = Math.floor(width * 0.25); 
+    const marginH = Math.floor(height * 0.25);
     return { 
         x: marginW, 
         y: marginH, 
         w: width - (marginW * 2), 
-        h: height - (marginH * 2) 
+        h: height - (marginH * 2),
+        isFallback: true 
     };
   }
 
@@ -284,14 +287,12 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
     x: Math.max(0, best.x - padding),
     y: Math.max(0, best.y - padding),
     w: Math.min(width - best.x + padding * 2, best.w + padding * 2),
-    h: Math.min(height - best.y + padding * 2, best.h + padding * 2)
+    h: Math.min(height - best.y + padding * 2, best.h + padding * 2),
+    isFallback: false
   };
 };
 
-const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, height: number): VisualFeatures => {
-  const fullImageData = ctx.getImageData(0, 0, width, height);
-  const bounds = detectObjectBounds(fullImageData.data, width, height);
-  
+const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, height: number, bounds: any): VisualFeatures => {
   // 1. Extração no Objeto Detectado (Para Formato e Textura)
   const imageData = ctx.getImageData(bounds.x, bounds.y, bounds.w, bounds.h);
   const data = imageData.data;
@@ -324,7 +325,6 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   const aspectRatio = bounds.h > 0 ? bounds.w / bounds.h : 1;
 
   // 2. Extração Global Estável (Centro Fixo da Imagem Original)
-  // Isso garante que imagens idênticas tenham cores idênticas, independente do recorte do blob
   const centerW = Math.floor(width * 0.4);
   const centerH = Math.floor(height * 0.4);
   const startX = Math.floor((width - centerW) / 2);
@@ -333,7 +333,7 @@ const extractVisualFeatures = (ctx: CanvasRenderingContext2D, width: number, hei
   const centerData = ctx.getImageData(startX, startY, centerW, centerH).data;
   let rAcc = 0, gAcc = 0, bAcc = 0, cCount = 0;
   
-  for (let i = 0; i < centerData.length; i += 16) { // Amostragem rápida
+  for (let i = 0; i < centerData.length; i += 16) { 
      rAcc += centerData[i];
      gAcc += centerData[i+1];
      bAcc += centerData[i+2];
@@ -407,7 +407,52 @@ const createInvertedImage = (ctx: CanvasRenderingContext2D, width: number, heigh
   return tempCanvas.toDataURL('image/jpeg', 0.9);
 };
 
-const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string, invertedUrl: string, features: VisualFeatures, processedPreview: string }> => {
+// Função auxiliar para cortar e dar zoom na luminária se ela for pequena (distante)
+const cropAndUpscale = (
+  ctx: CanvasRenderingContext2D, 
+  bounds: {x: number, y: number, w: number, h: number},
+  fullWidth: number,
+  fullHeight: number
+): { normalUrl: string, invertedUrl: string } => {
+  
+  const cropCanvas = document.createElement('canvas');
+  const cropCtx = cropCanvas.getContext('2d');
+  
+  // Se a luminária for menor que 30% da imagem (distante), fazemos upscaling
+  const isSmall = (bounds.w * bounds.h) < (fullWidth * fullHeight * 0.3);
+  const scale = isSmall ? 2.5 : 1.0;
+
+  cropCanvas.width = bounds.w * scale;
+  cropCanvas.height = bounds.h * scale;
+
+  if (cropCtx) {
+    cropCtx.imageSmoothingEnabled = true;
+    cropCtx.imageSmoothingQuality = 'high';
+    // Desenha apenas a parte detectada, com zoom se necessário
+    cropCtx.drawImage(
+      ctx.canvas, 
+      bounds.x, bounds.y, bounds.w, bounds.h, 
+      0, 0, cropCanvas.width, cropCanvas.height
+    );
+
+    // Aplica filtros no recorte
+    applyOcrFilters(cropCtx, cropCanvas.width, cropCanvas.height);
+    
+    const normalUrl = cropCanvas.toDataURL('image/jpeg', 0.9);
+    const invertedUrl = createInvertedImage(cropCtx, cropCanvas.width, cropCanvas.height);
+    return { normalUrl, invertedUrl };
+  }
+  
+  return { normalUrl: '', invertedUrl: '' };
+};
+
+const preprocessImage = async (base64Image: string): Promise<{ 
+  normalUrl: string, 
+  invertedUrl: string, 
+  features: VisualFeatures, 
+  processedPreview: string,
+  isFallback: boolean
+}> => {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
@@ -418,35 +463,55 @@ const preprocessImage = async (base64Image: string): Promise<{ normalUrl: string
             normalUrl: base64Image, 
             invertedUrl: base64Image,
             features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
-            processedPreview: base64Image
+            processedPreview: base64Image,
+            isFallback: true
         }); 
         return; 
       }
 
-      // Tamanho padronizado crítico para features consistentes
-      canvas.width = 800; 
-      const scale = 800 / img.width;
-      canvas.height = img.height * scale;
+      // 1. Manter alta resolução para permitir leitura de longe
+      // Aumentado para 2000px de largura
+      const maxDim = DETECT_CONFIG.MAX_WIDTH;
+      let width = img.width;
+      let height = img.height;
       
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      if (width > maxDim || height > maxDim) {
+          const ratio = Math.min(maxDim / width, maxDim / height);
+          width = Math.floor(width * ratio);
+          height = Math.floor(height * ratio);
+      }
+
+      canvas.width = width;
+      canvas.height = height;
       
-      // 1. Extrair Features (Antes de destruir a imagem com filtros)
-      const features = extractVisualFeatures(ctx, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, width, height);
+      const fullImageData = ctx.getImageData(0, 0, width, height);
 
-      // 2. Aplicar Filtros para OCR
-      applyOcrFilters(ctx, canvas.width, canvas.height);
-      const normalUrl = canvas.toDataURL('image/jpeg', 0.8);
-      const processedPreview = normalUrl;
-      const invertedUrl = createInvertedImage(ctx, canvas.width, canvas.height);
+      // 2. Detectar Onde está a luminária
+      const bounds = detectObjectBounds(fullImageData.data, width, height);
+      
+      // 3. Extrair Features do objeto detectado
+      const features = extractVisualFeatures(ctx, width, height, bounds);
 
-      resolve({ normalUrl, invertedUrl, features, processedPreview });
+      // 4. Recorte Inteligente (Smart Crop) + Upscale (Zoom Digital)
+      // Em vez de enviar a imagem toda cheia de céu, enviamos só o recorte ampliado
+      const { normalUrl, invertedUrl } = cropAndUpscale(ctx, bounds, width, height);
+
+      resolve({ 
+        normalUrl, 
+        invertedUrl, 
+        features, 
+        processedPreview: normalUrl,
+        isFallback: !!bounds.isFallback
+      });
     };
     
     img.onerror = () => resolve({ 
         normalUrl: base64Image, 
         invertedUrl: base64Image,
         features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
-        processedPreview: base64Image
+        processedPreview: base64Image,
+        isFallback: true
     });
     
     img.src = `data:image/jpeg;base64,${base64Image}`;
@@ -515,18 +580,18 @@ export const analyzeLuminaireImage = async (
   trainingData: TrainingExample[]
 ): Promise<AnalysisResponse & { processedPreview?: string }> => {
   
-  const { normalUrl, invertedUrl, features, processedPreview } = await preprocessImage(base64Image);
+  const { normalUrl, invertedUrl, features, processedPreview, isFallback } = await preprocessImage(base64Image);
 
   // --- FILTRO DE OBJETOS INVÁLIDOS (POSTES/LONGE) ---
-  // Se o Aspect Ratio for menor que 0.40, é muito provável que seja um poste vertical
-  // ou uma imagem que o detector não conseguiu recortar bem.
-  if (features.aspectRatio < 0.40) {
+  // Se o objeto for extremamente pequeno E o Aspect Ratio for de poste, ignoramos.
+  // Se detectObjectBounds retornou fallback (centro), significa que não achou nada relevante.
+  if (isFallback) {
       return {
           model: null,
-          rawText: "Ignorado",
+          rawText: "Muito Distante",
           calculatedPower: null,
           confidence: 0,
-          reasoning: "Ignorado: Imagem parece ser um poste ou estar muito distante (Muito vertical/fina).",
+          reasoning: "Ignorado: Objeto muito pequeno ou distante para leitura confiável.",
           features: features,
           processedPreview: processedPreview
       };
@@ -542,12 +607,11 @@ export const analyzeLuminaireImage = async (
   let ocrResult: AnalysisResponse | null = null;
   
   // Só roda OCR se não for uma duplicata óbvia, ou se quisermos confirmar
-  // (Rodamos para extrair texto novo caso seja uma luminária igual mas etiqueta diferente)
   try {
     const worker = await Tesseract.createWorker('eng');
     await worker.setParameters({
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:Ww',
-      tessedit_pageseg_mode: '6' as any,
+      tessedit_pageseg_mode: '6' as any, // 6 = Assume block of text (bom para o crop)
     });
 
     const resNormal = await worker.recognize(normalUrl);
@@ -568,26 +632,21 @@ export const analyzeLuminaireImage = async (
   let finalReasoning = ocrResult?.reasoning || "";
 
   if (isExactDuplicate && visualMatch) {
-      // Prioridade TOTAL para a memória se a imagem for visualmente idêntica
-      // A menos que o OCR tenha achado uma potência VÁLIDA e DIFERENTE (caso raro de reetiquetagem)
       if (finalPower && finalPower !== visualMatch.power) {
-          finalReasoning = `Atenção: Visual idêntico (${(visualDiff*100).toFixed(1)}% diff), mas OCR leu potência diferente (${finalPower}W).`;
-          finalConfidence = 0.85; // Alta confiança mas alerta
+          finalReasoning = `Atenção: Visual idêntico, mas OCR leu potência diferente.`;
+          finalConfidence = 0.85; 
       } else {
           finalModel = visualMatch.model;
           finalPower = visualMatch.power;
           finalConfidence = 1.0;
           finalReasoning = "Luminária Reconhecida na Memória Visual.";
-          finalModel = visualMatch.model; // Força modelo da memória
       }
   } else if (visualMatch && visualDiff < 0.15) {
-      // Visual Parecido (Mesmo modelo, outra foto)
       if (!finalModel) {
           finalModel = visualMatch.model;
           finalReasoning += ` | Modelo sugerido por similaridade visual (${(visualDiff*100).toFixed(1)}%).`;
           finalConfidence = Math.max(finalConfidence, 0.75);
       }
-      // Cruzamento: Se OCR falhou na potência, usa visual
       if (!finalPower) {
           finalPower = visualMatch.power;
           finalReasoning += ` | Potência sugerida por similaridade.`;
@@ -596,12 +655,12 @@ export const analyzeLuminaireImage = async (
 
   if (!finalModel && !finalPower && !visualMatch) {
       finalConfidence = 0;
-      finalReasoning = "Não identificado. Adicione ao treinamento.";
+      finalReasoning = "Não identificado. Distante ou sem etiqueta legível.";
   }
 
   return {
     model: finalModel,
-    rawText: ocrResult ? ocrResult.rawText : "OCR Ignorado/Falha",
+    rawText: ocrResult ? ocrResult.rawText : "OCR Ignorado",
     calculatedPower: finalPower,
     confidence: finalConfidence,
     reasoning: finalReasoning,
