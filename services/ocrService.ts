@@ -105,10 +105,10 @@ const MODEL_VALID_POWERS: Record<string, number[]> = {
 };
 
 const DETECT_CONFIG = {
-  // Aumentado para 2000px para permitir leitura de objetos distantes
+  // Aumentado para permitir leitura de objetos distantes
   MAX_WIDTH: 2000, 
-  // Reduzido para 1.5%: Permite detectar luminárias distantes, mas o filtro AR remove ruído
-  MIN_BLOB_PERCENT: 0.015 
+  // Reduzido para evitar descartar etiquetas pequenas
+  MIN_BLOB_PERCENT: 0.005 
 };
 
 // --- UTILS: FUZZY MATCHING ---
@@ -132,21 +132,25 @@ const levenshteinDistance = (a: string, b: string): number => {
   return matrix[b.length][a.length];
 };
 
-const fuzzyContains = (text: string, target: string, tolerance: number = 2): boolean => {
-  if (target.length < 3) return false; 
+const fuzzyContains = (text: string, target: string, defaultTolerance: number = 2): boolean => {
+  if (target.length < 2) return false; 
   const targetUpper = target.toUpperCase();
   
+  // Strict check for very short models to avoid false positives (e.g. 'ALP' inside 'ALPHA')
   if (text.includes(targetUpper)) return true;
 
-  const words = text.split(/[\s\-\/\.]+/);
+  const words = text.split(/[\s\-\/\.:,]+/);
   
   for (const word of words) {
-    if (Math.abs(word.length - targetUpper.length) > tolerance) continue;
+    if (Math.abs(word.length - targetUpper.length) > defaultTolerance) continue;
     
-    const dynamicTolerance = targetUpper.length <= 4 ? 1 : tolerance;
+    // Dynamic Tolerance based on length
+    let tolerance = defaultTolerance;
+    if (targetUpper.length <= 3) tolerance = 0; // ALP, ORI, LED must be exact
+    else if (targetUpper.length <= 5) tolerance = 1; // Short names allow 1 error
     
     const dist = levenshteinDistance(word, targetUpper);
-    if (dist <= dynamicTolerance) return true;
+    if (dist <= tolerance) return true;
   }
   
   return false;
@@ -174,8 +178,21 @@ const rgbToHsl = (r: number, g: number, b: number) => {
 
 const isSkyPixel = (r: number, g: number, b: number) => {
   const [h, s, l] = rgbToHsl(r, g, b);
-  if (l > 0.90) return true; 
-  if (h > 180 && h < 260 && s > 0.15 && l > 0.45) return true; 
+  
+  // FIX CRÍTICO: Etiquetas são brancas (L alto). 
+  // O código antigo ignorava L > 0.90 achando que era sol/céu.
+  // Agora só ignoramos se for Azul E Claro (Céu), ou Azul e Saturado.
+  
+  const isBlueHue = (h > 170 && h < 270);
+  
+  // Céu Azul Claro
+  if (isBlueHue && s > 0.2 && l > 0.4) return true;
+  
+  // Céu Branco/Cinza nublado (muito difícil distinguir de etiquetas brancas, então somos conservadores)
+  // Só removemos se for EXTREMAMENTE brilhante e EXTREMAMENTE desaturado (quase estourado do sol)
+  // mas mantemos se tiver um pouco de "sujeira" (labels nunca são branco perfeito #FFFFFF)
+  if (l > 0.98 && s < 0.05) return true; 
+
   return false;
 };
 
@@ -208,7 +225,7 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
         visited[idx] = 1;
         
         let loopCount = 0;
-        const maxLoop = 50000; 
+        const maxLoop = 80000; 
 
         while (stack.length > 0 && loopCount < maxLoop) {
           loopCount++;
@@ -257,13 +274,14 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
   const validBlobs = blobs.filter(b => {
     if (b.area < minAreaThreshold) return false;
     const ar = b.w / b.h;
-    if (ar > 5.0 || ar < 0.35) return false; 
+    // Relaxed Aspect Ratio to allow long labels
+    if (ar > 8.0 || ar < 0.1) return false; 
     return true;
   });
 
   if (validBlobs.length === 0) {
-    const marginW = Math.floor(width * 0.25); 
-    const marginH = Math.floor(height * 0.25);
+    const marginW = Math.floor(width * 0.15); 
+    const marginH = Math.floor(height * 0.15);
     return { 
         x: marginW, 
         y: marginH, 
@@ -277,7 +295,7 @@ const detectObjectBounds = (data: Uint8ClampedArray, width: number, height: numb
   validBlobs.sort((a, b) => b.area - a.area);
   const best = validBlobs[0];
 
-  const padding = 20;
+  const padding = 30; // Mais padding para garantir que não cortamos a borda da etiqueta
   return {
     x: Math.max(0, best.x - padding),
     y: Math.max(0, best.y - padding),
@@ -355,6 +373,7 @@ const applyOcrFilters = (ctx: CanvasRenderingContext2D, width: number, height: n
 
   const output = new Uint8ClampedArray(data);
 
+  // Sharpening Kernel
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const idx = (y * w + x) * 4;
@@ -372,9 +391,11 @@ const applyOcrFilters = (ctx: CanvasRenderingContext2D, width: number, height: n
     }
   }
 
+  // Binarization with Threshold
   for (let i = 0; i < output.length; i += 4) {
     const gray = output[i] * 0.299 + output[i + 1] * 0.587 + output[i + 2] * 0.114;
-    const val = gray > 140 ? 255 : 0;
+    // Increased threshold to keep more details in bright labels
+    const val = gray > 150 ? 255 : 0; 
     data[i] = val;
     data[i+1] = val;
     data[i+2] = val;
@@ -408,8 +429,9 @@ const cropAndUpscale = (
   const cropCanvas = document.createElement('canvas');
   const cropCtx = cropCanvas.getContext('2d');
   
-  const isSmall = (bounds.w * bounds.h) < (fullWidth * fullHeight * 0.3);
-  const scale = isSmall ? 2.5 : 1.0;
+  // Se o crop for muito pequeno, upscaling agressivo
+  const isSmall = (bounds.w * bounds.h) < (fullWidth * fullHeight * 0.2);
+  const scale = isSmall ? 2.5 : 1.2;
 
   cropCanvas.width = bounds.w * scale;
   cropCanvas.height = bounds.h * scale;
@@ -444,8 +466,8 @@ const calculateImageScore = async (file: File): Promise<number> => {
         const ctx = canvas.getContext('2d');
         if(!ctx) { resolve(0); return; }
 
-        // Redimensiona para análise rápida (max 800px)
-        const maxDim = 800;
+        // Redimensiona para análise rápida (max 600px)
+        const maxDim = 600;
         let w = img.width;
         let h = img.height;
         if(w > maxDim || h > maxDim) {
@@ -460,18 +482,22 @@ const calculateImageScore = async (file: File): Promise<number> => {
         const imageData = ctx.getImageData(0, 0, w, h);
         const bounds = detectObjectBounds(imageData.data, w, h);
         
-        // Se for fallback (não achou objeto), score é zero
+        // Se for fallback (não achou objeto), score baixo
         if(bounds.isFallback) {
-          resolve(0);
+          resolve(0.1);
           return;
         }
 
-        // Score base: Área do objeto (Zoom) tem peso 70%
-        // Nitidez (Edge Density) tem peso 30%
+        // Score base: 
+        // 1. Zoom (Área relativa) - Peso 60%
+        // 2. Contraste/Bordas - Peso 40%
         const objectAreaRatio = (bounds.w * bounds.h) / (w * h);
         const features = extractVisualFeatures(ctx, w, h, bounds);
         
-        const score = (objectAreaRatio * 0.7) + (features.edgeDensity * 0.3);
+        // Bônus se a imagem for brilhante (etiqueta iluminada) mas não estourada
+        const brightnessBonus = (features.brightness > 100 && features.brightness < 240) ? 0.2 : 0;
+        
+        const score = (objectAreaRatio * 0.6) + (features.edgeDensity * 0.4) + brightnessBonus;
         resolve(score);
       };
       img.onerror = () => resolve(0);
@@ -504,6 +530,7 @@ export const selectBestImageFromBatch = async (files: File[]): Promise<File> => 
 const preprocessImage = async (base64Image: string): Promise<{ 
   normalUrl: string, 
   invertedUrl: string, 
+  fullResizedUrl: string, // URL da imagem cheia, apenas redimensionada
   features: VisualFeatures, 
   processedPreview: string,
   isFallback: boolean
@@ -517,6 +544,7 @@ const preprocessImage = async (base64Image: string): Promise<{
         resolve({ 
             normalUrl: base64Image, 
             invertedUrl: base64Image,
+            fullResizedUrl: base64Image,
             features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
             processedPreview: base64Image,
             isFallback: true
@@ -538,8 +566,11 @@ const preprocessImage = async (base64Image: string): Promise<{
       canvas.height = height;
       
       ctx.drawImage(img, 0, 0, width, height);
+      
+      // Cria versão Full Resized (para OCR de segurança se o crop falhar)
+      const fullResizedUrl = canvas.toDataURL('image/jpeg', 0.8);
+      
       const fullImageData = ctx.getImageData(0, 0, width, height);
-
       const bounds = detectObjectBounds(fullImageData.data, width, height);
       const features = extractVisualFeatures(ctx, width, height, bounds);
       const { normalUrl, invertedUrl } = cropAndUpscale(ctx, bounds, width, height);
@@ -547,6 +578,7 @@ const preprocessImage = async (base64Image: string): Promise<{
       resolve({ 
         normalUrl, 
         invertedUrl, 
+        fullResizedUrl,
         features, 
         processedPreview: normalUrl,
         isFallback: !!bounds.isFallback
@@ -556,6 +588,7 @@ const preprocessImage = async (base64Image: string): Promise<{
     img.onerror = () => resolve({ 
         normalUrl: base64Image, 
         invertedUrl: base64Image,
+        fullResizedUrl: base64Image,
         features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
         processedPreview: base64Image,
         isFallback: true
@@ -616,7 +649,7 @@ export const analyzeLuminaireImage = async (
   trainingData: TrainingExample[]
 ): Promise<AnalysisResponse & { processedPreview?: string }> => {
   
-  const { normalUrl, invertedUrl, features, processedPreview, isFallback } = await preprocessImage(base64Image);
+  const { normalUrl, invertedUrl, fullResizedUrl, features, processedPreview, isFallback } = await preprocessImage(base64Image);
 
   let localResult: AnalysisResponse = {
       model: null,
@@ -642,68 +675,82 @@ export const analyzeLuminaireImage = async (
       };
   }
 
-  if (!isFallback) {
-      try {
-        const worker = await Tesseract.createWorker('eng');
-        await worker.setParameters({
-          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:Ww',
-          tessedit_pageseg_mode: '6' as any,
-        });
+  // --- ESTRATÉGIA HÍBRIDA DE OCR ---
+  try {
+    const worker = await Tesseract.createWorker('eng');
+    await worker.setParameters({
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:Ww',
+      tessedit_pageseg_mode: '6' as any, // Assume uniform text block
+    });
 
-        const resNormal = await worker.recognize(normalUrl);
-        const resInverted = await worker.recognize(invertedUrl);
-        await worker.terminate();
+    let combinedText = "";
 
-        const combinedText = `${resNormal.data.text} \n ${resInverted.data.text}`;
-        const processedOcr = processExtractedText(combinedText, features, trainingData);
-        
-        localResult = {
-            ...processedOcr,
-            features, 
-            reasoning: "OCR: " + processedOcr.reasoning
-        };
-        
-        if (visualMatch && visualDiff < 0.20) {
-             const similarity = ((1 - visualDiff) * 100).toFixed(0);
-             
-             if (localResult.model && localResult.calculatedPower) {
-                 if (localResult.model === visualMatch.model) {
-                     localResult.confidence = Math.max(localResult.confidence, 0.95);
-                     localResult.reasoning += ` | Confirmado visualmente (${similarity}% similar).`;
-                 }
-             }
-             
-             if (!localResult.model) {
-                 localResult.model = visualMatch.model;
-                 localResult.confidence = Math.max(localResult.confidence, 0.70);
-                 localResult.reasoning += ` | Modelo sugerido por similaridade visual (${similarity}%).`;
-             }
+    // 1. Tenta OCR no Crop (Normal)
+    const resNormal = await worker.recognize(normalUrl);
+    combinedText += ` ${resNormal.data.text}`;
 
-             if (localResult.model && !localResult.calculatedPower) {
-                 if (localResult.model === visualMatch.model || !localResult.model) {
-                     localResult.calculatedPower = visualMatch.power;
-                     localResult.confidence = Math.max(localResult.confidence, 0.80);
-                     localResult.reasoning += ` | Potência estimada por padrão visual similar (${similarity}%).`;
-                 }
-             }
+    // 2. Tenta OCR no Crop (Invertido) - ajuda com texto branco em fundo escuro
+    const resInverted = await worker.recognize(invertedUrl);
+    combinedText += ` ${resInverted.data.text}`;
 
-             if (!localResult.model && !localResult.calculatedPower) {
-                  localResult.model = visualMatch.model;
+    // 3. SE a confiança for baixa ou texto curto, tenta na imagem COMPLETA (Segurança contra Crop ruim)
+    if (combinedText.length < 10 || !combinedText.match(/\d/)) {
+         await worker.setParameters({ tessedit_pageseg_mode: '3' as any }); // Auto segmentation for full image
+         const resFull = await worker.recognize(fullResizedUrl);
+         combinedText += ` \n ${resFull.data.text}`;
+    }
+
+    await worker.terminate();
+
+    const processedOcr = processExtractedText(combinedText, features, trainingData);
+    
+    localResult = {
+        ...processedOcr,
+        features, 
+        reasoning: "OCR: " + processedOcr.reasoning
+    };
+    
+    // --- LÓGICA DE FUSÃO VISUAL + OCR ---
+    if (visualMatch && visualDiff < 0.20) {
+          const similarity = ((1 - visualDiff) * 100).toFixed(0);
+          
+          if (localResult.model && localResult.calculatedPower) {
+              if (localResult.model === visualMatch.model) {
+                  localResult.confidence = Math.max(localResult.confidence, 0.98);
+                  localResult.reasoning += ` | Confirmado visualmente (${similarity}%).`;
+              }
+          }
+          
+          if (!localResult.model) {
+              localResult.model = visualMatch.model;
+              localResult.confidence = Math.max(localResult.confidence, 0.75);
+              localResult.reasoning += ` | Modelo sugerido por similaridade visual (${similarity}%).`;
+          }
+
+          if (localResult.model && !localResult.calculatedPower) {
+              if (localResult.model === visualMatch.model || !localResult.model) {
                   localResult.calculatedPower = visualMatch.power;
-                  localResult.confidence = 0.60; 
-                  localResult.reasoning = `Estimativa baseada puramente em similaridade visual (${similarity}%). Verificar etiqueta.`;
-             }
-        }
+                  localResult.confidence = Math.max(localResult.confidence, 0.85);
+                  localResult.reasoning += ` | Potência estimada por padrão visual similar (${similarity}%).`;
+              }
+          }
 
-      } catch (error) {
-        console.error("OCR Local falhou", error);
-        if (visualMatch && visualDiff < 0.20) {
-            localResult.model = visualMatch.model;
-            localResult.calculatedPower = visualMatch.power;
-            localResult.confidence = 0.5;
-            localResult.reasoning = "OCR Falhou. Sugestão visual.";
-        }
-      }
+          if (!localResult.model && !localResult.calculatedPower) {
+              localResult.model = visualMatch.model;
+              localResult.calculatedPower = visualMatch.power;
+              localResult.confidence = 0.65; 
+              localResult.reasoning = `Estimativa baseada puramente em similaridade visual (${similarity}%). Verificar etiqueta.`;
+          }
+    }
+
+  } catch (error) {
+    console.error("OCR Local falhou", error);
+    if (visualMatch && visualDiff < 0.20) {
+        localResult.model = visualMatch.model;
+        localResult.calculatedPower = visualMatch.power;
+        localResult.confidence = 0.5;
+        localResult.reasoning = "OCR Falhou. Sugestão visual.";
+    }
   }
 
   return { ...localResult, processedPreview };
@@ -723,11 +770,15 @@ const processExtractedText = (
   let power: number | null = null;
   let reasoningParts: string[] = [];
 
+  // --- DETECÇÃO DE MODELO ---
   const knownModels = new Set<string>();
   trainingData.forEach(t => knownModels.add(t.model));
   Object.keys(MODEL_VALID_POWERS).forEach(m => knownModels.add(m));
 
-  for (const knownModel of knownModels) {
+  // Sort by length desc to match longest first (e.g. BRIGHTLUX URBJET before BRIGHTLUX)
+  const sortedModels = Array.from(knownModels).sort((a, b) => b.length - a.length);
+
+  for (const knownModel of sortedModels) {
     if (fuzzyContains(cleanText, knownModel, 2)) {
       model = knownModel;
       reasoningParts.push(`Modelo Identificado: ${model}`);
@@ -735,6 +786,7 @@ const processExtractedText = (
     }
   }
 
+  // Backup: Assinatura de erro
   if (!model) {
     for (const example of trainingData) {
       if (example.ocrSignature && cleanText.includes(example.ocrSignature)) {
@@ -746,48 +798,72 @@ const processExtractedText = (
     }
   }
 
-  const powerRegex = /(\d+)\s*[Ww]|(\d{2,3})/g;
-  const matches = [...cleanText.matchAll(powerRegex)];
-  const potentialPowers: number[] = [];
+  // --- DETECÇÃO DE POTÊNCIA (REGEX MELHORADA) ---
+  
+  // 1. Prioridade Máxima: Número + W (ex: 150W, 150 W, 150WATTS)
+  // Regex: Borda de palavra \b, número, espaço opcional, W ou WATTS, borda de palavra
+  const explicitPowerRegex = /\b(\d{2,3})\s?(W|WATTS)\b/g;
+  const explicitMatches = [...cleanText.matchAll(explicitPowerRegex)];
+  
+  const explicitPowers = explicitMatches.map(m => parseInt(m[1], 10));
 
-  for (const match of matches) {
-      if (match[1]) {
-          const val = parseInt(match[1], 10);
-          potentialPowers.push(val);
-      } 
-      else if (match[2]) {
-          let val = parseInt(match[2], 10);
-          if ([110, 127, 220, 380, 2023, 2024, 2025].includes(val)) continue;
-          if (val > 0 && val <= 9) val *= 10;
-          potentialPowers.push(val);
-      }
+  if (explicitPowers.length > 0) {
+     // Filtra outliers (ex: 220W voltagem confundida é raro escrito assim, mas acontece. Filtrar ano 2024)
+     const validExplicit = explicitPowers.filter(p => p > 10 && p < 500 && p !== 220 && p !== 127 && p !== 110);
+     if (validExplicit.length > 0) {
+         power = Math.max(...validExplicit); // Assume maior potência (projetores as vezes tem soma)
+         reasoningParts.push(`Potência Explícita Encontrada: ${power}W`);
+     }
   }
 
-  if (model && MODEL_VALID_POWERS[model]) {
-      const validSet = MODEL_VALID_POWERS[model];
-      const validMatch = potentialPowers.find(p => validSet.includes(p));
-      if (validMatch) {
-          power = validMatch;
-          reasoningParts.push(`Potência Validada na Tabela: ${power}W`);
+  // 2. Se não achou explícito, busca números soltos que casam com a tabela do modelo
+  if (!power) {
+      const looseNumberRegex = /\b(\d{2,3})\b/g;
+      const looseMatches = [...cleanText.matchAll(looseNumberRegex)];
+      const potentialPowers = looseMatches.map(m => parseInt(m[1], 10))
+         .filter(p => ![110, 127, 220, 380, 2023, 2024, 2025].includes(p)); // Filtra voltagens comuns e anos
+
+      if (model && MODEL_VALID_POWERS[model]) {
+          const validSet = MODEL_VALID_POWERS[model];
+          // Interseção entre números encontrados e potências válidas do modelo
+          const validMatch = potentialPowers.find(p => validSet.includes(p));
+          
+          if (validMatch) {
+              power = validMatch;
+              reasoningParts.push(`Potência Validada na Tabela (${model}): ${power}W`);
+          }
+      } else if (potentialPowers.length > 0) {
+           // Heurística para números pequenos sem modelo: Códigos como "08" -> 80W?
+           // O código original fazia isso. Vamos manter com cuidado.
+           // Se tiver muitos números, é arriscado.
+           // Vamos tentar achar números comuns de iluminação pública: 50, 60, 80, 100, 150...
+           const commmonStreetLights = [30, 40, 50, 58, 60, 70, 80, 90, 100, 120, 150, 180, 200, 250];
+           const bestGuess = potentialPowers.find(p => commmonStreetLights.includes(p));
+           if (bestGuess) {
+              power = bestGuess;
+              reasoningParts.push(`Potência Comum Detectada: ${power}W (Incerto)`);
+           }
       }
   }
-
-  if (!power && potentialPowers.length > 0) {
-      const reasonable = potentialPowers.filter(p => p >= 10 && p <= 400);
-      if (reasonable.length > 0) {
-          power = Math.max(...reasonable); 
-          reasoningParts.push(`Potência Lida na Etiqueta: ${power}W`);
+  
+  // Regra de multiplicação antiga (ex: "06" -> 60W)
+  if (!power) {
+      const smallNumRegex = /\b0([1-9])\b/g; // 06, 08...
+      const smallMatch = smallNumRegex.exec(cleanText);
+      if (smallMatch) {
+          power = parseInt(smallMatch[1], 10) * 10;
+          reasoningParts.push(`Regra de Código Curto (0${smallMatch[1]} -> ${power}W)`);
       }
   }
 
   let confidence = 0.2;
-  if (model && power) confidence = 0.90;
-  else if (model) confidence = 0.6;
-  else if (power) confidence = 0.5;
+  if (model && power) confidence = 0.92;
+  else if (model) confidence = 0.7;
+  else if (power) confidence = 0.6;
 
   return {
     model: model,
-    rawText: cleanText.substring(0, 50),
+    rawText: cleanText.substring(0, 80), // Aumentado preview
     calculatedPower: power,
     confidence: confidence,
     reasoning: reasoningParts.length > 0 ? reasoningParts.join(". ") : "Dados insuficientes"

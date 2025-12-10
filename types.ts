@@ -1,3 +1,4 @@
+import React from 'react';
 
 export interface VisualFeatures {
   aspectRatio: number;
