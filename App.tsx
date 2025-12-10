@@ -191,7 +191,10 @@ const App: React.FC = () => {
   // Zoom Modal State
   const [zoomedImage, setZoomedImage] = useState<string | null>(null);
 
+  // Separate refs for Folder vs File upload
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  
   const jsonInputRef = useRef<HTMLInputElement>(null);
 
   const CONFIDENCE_THRESHOLD = 0.85;
@@ -228,6 +231,7 @@ const App: React.FC = () => {
 
   const processJob = async (job: ProcessingJob) => {
     // 1. Seleciona a melhor imagem do lote
+    // Se o job tiver apenas 1 arquivo (modo unitário), retorna ele mesmo imediatamente
     const bestFile = await selectBestImageFromBatch(job.files);
 
     return new Promise<void>((resolve) => {
@@ -245,8 +249,8 @@ const App: React.FC = () => {
 
         const newResult: DetectionResult = {
           id: Date.now().toString() + Math.random().toString().slice(2, 6),
-          pointId: job.id, // Nome da pasta
-          fileName: bestFile.name, // Nome do arquivo original
+          pointId: job.id, // Nome da pasta ou Nome do Arquivo (se unitário)
+          fileName: bestFile.name, 
           timestamp: Date.now(),
           imageUrl: base64String,
           model: analysisResponse.model,
@@ -269,18 +273,24 @@ const App: React.FC = () => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
 
-    // Agrupar arquivos por pasta (Ponto ID)
     const groups: Record<string, File[]> = {};
     
-    Array.from(files).forEach(file => {
+    Array.from(files).forEach((file: File) => {
       // webkitRelativePath formato: "PastaPai/Arquivo.jpg"
-      // Se for upload direto de arquivo sem pasta, usa o nome do arquivo (fallback)
-      const path = file.webkitRelativePath || file.name;
+      // Se tiver caminho relativo, é um upload de pasta.
+      const path = (file as any).webkitRelativePath || "";
       const parts = path.split('/');
       
-      // Se tiver pasta, o ID é o nome da pasta pai. Se não, é 'Raiz'.
-      // Ex: "PONTO_01/img1.jpg" -> id = "PONTO_01"
-      const groupId = parts.length > 1 ? parts[parts.length - 2] : "Upload Geral";
+      let groupId;
+      
+      if (path && parts.length > 1) {
+        // MODO PASTA: Agrupa pelo nome da pasta pai (ex: PONTO_01)
+        groupId = parts[parts.length - 2];
+      } else {
+        // MODO ARQUIVO UNITÁRIO: Cada arquivo é um job independente.
+        // Usamos o nome do arquivo como "ID" para que ele seja processado individualmente.
+        groupId = file.name;
+      }
       
       if (!groups[groupId]) {
         groups[groupId] = [];
@@ -296,6 +306,9 @@ const App: React.FC = () => {
 
     setQueue(prev => [...prev, ...newJobs]);
     if (queue.length === 0) setProcessedCount(0);
+    
+    // Limpar inputs
+    if (folderInputRef.current) folderInputRef.current.value = '';
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -518,44 +531,57 @@ const App: React.FC = () => {
       <main className="flex-1 md:ml-64 p-4 md:p-8 overflow-y-auto">
         <div className="max-w-6xl mx-auto mb-8">
            <div className="bg-white rounded-2xl shadow-lg border border-indigo-50 p-6 md:p-8 text-center relative overflow-hidden">
-              <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Reconhecimento em Massa</h2>
+              <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Reconhecimento Inteligente</h2>
               <p className="text-slate-500 mb-8 max-w-xl mx-auto relative z-10 text-sm md:text-base">
-                Selecione a pasta raiz com as subpastas dos pontos. O sistema escolherá automaticamente a melhor foto de cada ponto.
+                Escolha o método de análise. Use "Selecionar Pasta" para pontos com múltiplas fotos (escolha automática da melhor) ou "Selecionar Fotos" para arquivos soltos.
               </p>
 
-              <div className="flex justify-center relative z-10">
+              <div className="flex flex-col md:flex-row gap-4 justify-center relative z-10 w-full px-4">
+                {/* INPUT PASTA */}
                 <input 
                   type="file" 
-                  ref={fileInputRef}
-                  accept="image/*"
+                  ref={folderInputRef}
                   // @ts-ignore
                   webkitdirectory="" 
+                  directory=""
                   multiple
                   onChange={handleFileUpload}
                   className="hidden" 
-                  id="imageUpload"
                 />
-                <label 
-                  htmlFor="imageUpload"
-                  className={`relative flex items-center gap-3 px-8 py-4 bg-slate-900 text-white rounded-full cursor-pointer hover:bg-indigo-600 hover:scale-105 transition-all duration-300 shadow-xl shadow-indigo-900/20 ${isWorking ? 'opacity-75 pointer-events-none' : ''}`}
+                <button 
+                  onClick={() => folderInputRef.current?.click()}
+                  className={`flex-1 max-w-sm flex items-center justify-center gap-3 px-6 py-4 bg-slate-900 text-white rounded-xl cursor-pointer hover:bg-indigo-600 hover:scale-[1.02] transition-all duration-300 shadow-xl shadow-indigo-900/20 ${isWorking ? 'opacity-50 pointer-events-none' : ''}`}
                 >
-                  {isWorking ? (
-                    <>
-                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      <span>Analisando...</span>
-                    </>
-                  ) : (
-                    <>
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                      </svg>
-                      <span className="font-semibold text-lg">Selecionar Pasta / Fotos</span>
-                    </>
-                  )}
-                </label>
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                    </svg>
+                    <div className="text-left">
+                        <span className="block font-bold text-sm">Selecionar Pasta</span>
+                        <span className="block text-[10px] text-slate-300">Modo Lote (Agrupado)</span>
+                    </div>
+                </button>
+
+                {/* INPUT ARQUIVOS */}
+                <input 
+                  type="file" 
+                  ref={fileInputRef}
+                  multiple
+                  accept="image/*"
+                  onChange={handleFileUpload}
+                  className="hidden" 
+                />
+                <button 
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`flex-1 max-w-sm flex items-center justify-center gap-3 px-6 py-4 bg-white text-slate-900 border border-slate-200 rounded-xl cursor-pointer hover:bg-slate-50 hover:border-indigo-300 hover:scale-[1.02] transition-all duration-300 shadow-sm ${isWorking ? 'opacity-50 pointer-events-none' : ''}`}
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                    <div className="text-left">
+                        <span className="block font-bold text-sm">Selecionar Fotos</span>
+                        <span className="block text-[10px] text-slate-400">Modo Unitário</span>
+                    </div>
+                </button>
               </div>
            </div>
         </div>

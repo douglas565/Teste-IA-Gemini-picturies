@@ -46,3 +46,12 @@ export interface GeminiResponse {
   confidence: number;
   reasoning: string;
 }
+
+// Fix for JSX Intrinsic Elements missing in some environments
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      [elemName: string]: any;
+    }
+  }
+}
