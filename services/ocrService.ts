@@ -9,7 +9,10 @@ interface PreprocessResult {
   fullResizedUrl: string;
   features: VisualFeatures;
   processedPreview: string;
-  isFallback: boolean;
+  validation: {
+    isValid: boolean;
+    reason: string;
+  };
 }
 
 // =============================================================================
@@ -19,7 +22,11 @@ interface PreprocessResult {
 class VisionProcessor {
   private static readonly DETECT_CONFIG = {
     MAX_WIDTH: 2000,
-    MIN_BLOB_PERCENT: 0.005
+    // Aumentado drasticamente: O objeto deve ocupar pelo menos 4% da imagem para ser considerado um "Close-up" válido.
+    // Isso evita pegar postes inteiros, ruas ou casas.
+    MIN_BLOB_PERCENT: 0.04, 
+    // Luminárias geralmente são horizontais. Se for muito vertical (> 2.5), é provável que seja um poste.
+    MAX_VERTICAL_ASPECT: 2.5 
   };
 
   public async preprocess(base64Image: string): Promise<PreprocessResult> {
@@ -29,7 +36,7 @@ class VisionProcessor {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
         if (!ctx) {
-          resolve(this.createFallbackResult(base64Image));
+          resolve(this.createFallbackResult(base64Image, "Erro Contexto Canvas"));
           return;
         }
 
@@ -41,9 +48,52 @@ class VisionProcessor {
         const fullResizedUrl = canvas.toDataURL('image/jpeg', 0.8);
         const fullImageData = ctx.getImageData(0, 0, width, height);
         
-        const bounds = this.detectObjectBounds(fullImageData.data, width, height);
-        const features = this.extractVisualFeatures(ctx, width, height, bounds);
-        const { normalUrl, invertedUrl } = this.cropAndUpscale(ctx, bounds, width, height);
+        // 1. Detecção Inteligente de Objeto (Filtra Céu e Chão)
+        const detection = this.detectObjectBounds(fullImageData.data, width, height);
+        
+        // 2. Validação de "Cena Ampla" vs "Luminária"
+        if (detection.isFallback || detection.isSceneNoise) {
+            resolve({
+                normalUrl: base64Image,
+                invertedUrl: base64Image,
+                fullResizedUrl: fullResizedUrl,
+                features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
+                processedPreview: fullResizedUrl,
+                validation: { isValid: false, reason: detection.reason || "Objeto não identificado" }
+            });
+            return;
+        }
+
+        const features = this.extractVisualFeatures(ctx, width, height, detection);
+        
+        // 3. Validação de Formato (Evitar Postes Verticais)
+        if (detection.h > detection.w * VisionProcessor.DETECT_CONFIG.MAX_VERTICAL_ASPECT) {
+             resolve({
+                normalUrl: base64Image,
+                invertedUrl: base64Image,
+                fullResizedUrl: fullResizedUrl,
+                features,
+                processedPreview: fullResizedUrl,
+                validation: { isValid: false, reason: "Formato Inválido (Provável Poste/Vertical)" }
+            });
+            return;
+        }
+
+        const { normalUrl, invertedUrl, finalWidth } = this.cropAndUpscale(ctx, detection, width, height);
+
+        // 4. Validação de Resolução Final (Distância)
+        // Se após o crop a largura for muito pequena, não há pixels suficientes para ler texto.
+        if (finalWidth < 250) {
+             resolve({
+                normalUrl,
+                invertedUrl,
+                fullResizedUrl,
+                features,
+                processedPreview: normalUrl,
+                validation: { isValid: false, reason: "Muito Distante (Resolução Insuficiente)" }
+            });
+            return;
+        }
 
         resolve({
           normalUrl,
@@ -51,11 +101,11 @@ class VisionProcessor {
           fullResizedUrl,
           features,
           processedPreview: normalUrl,
-          isFallback: !!bounds.isFallback
+          validation: { isValid: true, reason: "OK" }
         });
       };
       
-      img.onerror = () => resolve(this.createFallbackResult(base64Image));
+      img.onerror = () => resolve(this.createFallbackResult(base64Image, "Erro Carregamento Imagem"));
       img.src = `data:image/jpeg;base64,${base64Image}`;
     });
   }
@@ -80,16 +130,16 @@ class VisionProcessor {
           const imageData = ctx.getImageData(0, 0, width, height);
           const bounds = this.detectObjectBounds(imageData.data, width, height);
           
-          if(bounds.isFallback) {
-            resolve(0.1);
+          if(bounds.isFallback || bounds.isSceneNoise) {
+            resolve(0); // Descarta imagens de cena ampla
             return;
           }
 
           const objectAreaRatio = (bounds.w * bounds.h) / (width * height);
           const features = this.extractVisualFeatures(ctx, width, height, bounds);
-          const brightnessBonus = (features.brightness > 100 && features.brightness < 240) ? 0.2 : 0;
           
-          const score = (objectAreaRatio * 0.6) + (features.edgeDensity * 0.4) + brightnessBonus;
+          // Pontua melhor: Imagens próximas (AreaRatio alto) e com bom contraste (EdgeDensity)
+          const score = (objectAreaRatio * 0.7) + (features.edgeDensity * 0.3);
           resolve(score);
         };
         img.onerror = () => resolve(0);
@@ -108,25 +158,28 @@ class VisionProcessor {
     return { width: w, height: h };
   }
 
-  private createFallbackResult(base64Image: string): PreprocessResult {
+  private createFallbackResult(base64Image: string, reason: string): PreprocessResult {
     return {
       normalUrl: base64Image,
       invertedUrl: base64Image,
       fullResizedUrl: base64Image,
       features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
       processedPreview: base64Image,
-      isFallback: true
+      validation: { isValid: false, reason }
     };
   }
 
-  // Lógica de Pixels e Detecção
+  // Lógica Avançada de Detecção
   private detectObjectBounds(data: Uint8ClampedArray, width: number, height: number) {
     const visited = new Uint8Array(width * height);
-    const blobs: {x: number, y: number, w: number, h: number, area: number}[] = [];
+    const blobs: {x: number, y: number, w: number, h: number, area: number, maxY: number}[] = [];
     const scanStep = 8; 
 
     const getIdx = (x: number, y: number) => y * width + x;
-    const minAreaThreshold = ((width * height) / (scanStep * scanStep)) * VisionProcessor.DETECT_CONFIG.MIN_BLOB_PERCENT;
+    
+    // O objeto precisa ser significativo na imagem para não ser considerado "fundo"
+    const totalPixels = width * height;
+    const minPixelCount = totalPixels * VisionProcessor.DETECT_CONFIG.MIN_BLOB_PERCENT;
 
     for (let y = 0; y < height; y += scanStep) {
       for (let x = 0; x < width; x += scanStep) {
@@ -138,14 +191,13 @@ class VisionProcessor {
         const b = data[idx * 4 + 2];
 
         if (!this.isSkyPixel(r, g, b)) {
-          // Algoritmo Flood Fill Simplificado
           let minX = x, maxX = x, minY = y, maxY = y;
           let count = 0;
           const stack = [{x, y}];
           visited[idx] = 1;
           
           let loopCount = 0;
-          const maxLoop = 80000; 
+          const maxLoop = 150000; // Limite de segurança
 
           while (stack.length > 0 && loopCount < maxLoop) {
             loopCount++;
@@ -180,29 +232,42 @@ class VisionProcessor {
             }
           }
           
-          blobs.push({ x: minX, y: minY, w: maxX - minX, h: maxY - minY, area: count });
+          blobs.push({ x: minX, y: minY, w: maxX - minX, h: maxY - minY, area: count, maxY: maxY });
         }
       }
     }
 
+    // Filtros de Qualidade do BLOB
     const validBlobs = blobs.filter(b => {
-      if (b.area < minAreaThreshold) return false;
-      const ar = b.w / b.h;
-      return !(ar > 8.0 || ar < 0.1);
+      // 1. Filtro de Tamanho (Distância)
+      if (b.area < (minPixelCount / (scanStep * scanStep))) return false;
+      
+      // 2. Filtro de Chão/Rua
+      // Se o objeto toca a parte de baixo da imagem (últimos 5%), provavelmente é a rua ou o poste continuando.
+      if (b.maxY > height * 0.98) return false;
+
+      return true;
     });
 
     if (validBlobs.length === 0) {
-      const marginW = Math.floor(width * 0.15); 
-      const marginH = Math.floor(height * 0.15);
+      // Se não achou nada válido, ou tudo era céu, ou tudo era rua (tocando embaixo)
+      // Ou tudo era muito pequeno (distante)
       return { 
-          x: marginW, y: marginH, w: width - (marginW * 2), h: height - (marginH * 2),
-          isFallback: true, area: 0
+          x: 0, y: 0, w: 0, h: 0,
+          isFallback: true, 
+          isSceneNoise: true,
+          reason: "Cena Ampla / Apenas Fundo Detectado"
       };
     }
 
+    // Ordena pelo maior objeto
     validBlobs.sort((a, b) => b.area - a.area);
+    
+    // Pega o maior objeto (assumimos que o usuário tentou centralizar a luminária)
     const best = validBlobs[0];
-    const padding = 30;
+    
+    // Padding para garantir que pegamos a etiqueta se estiver na borda do contraste
+    const padding = 20;
 
     return {
       x: Math.max(0, best.x - padding),
@@ -210,7 +275,8 @@ class VisionProcessor {
       w: Math.min(width - best.x + padding * 2, best.w + padding * 2),
       h: Math.min(height - best.y + padding * 2, best.h + padding * 2),
       isFallback: false,
-      area: best.area
+      isSceneNoise: false,
+      reason: null
     };
   }
 
@@ -225,14 +291,10 @@ class VisionProcessor {
       for (let x = 0; x < bounds.w - step; x += step) {
         const i = (y * bounds.w + x) * 4;
         const lum = this.getLuminance(data, i);
-        
-        const iRight = (y * bounds.w + (x + step)) * 4;
-        const lumRight = this.getLuminance(data, iRight);
-        
-        const iDown = ((y + step) * bounds.w + x) * 4;
-        const lumDown = this.getLuminance(data, iDown);
+        const lumRight = this.getLuminance(data, (y * bounds.w + (x + step)) * 4);
+        const lumDown = this.getLuminance(data, ((y + step) * bounds.w + x) * 4);
 
-        if (Math.abs(lum - lumRight) > 25 || Math.abs(lum - lumDown) > 25) {
+        if (Math.abs(lum - lumRight) > 20 || Math.abs(lum - lumDown) > 20) {
           edges++;
         }
         count++;
@@ -242,7 +304,7 @@ class VisionProcessor {
     const edgeDensity = count > 0 ? edges / count : 0;
     const aspectRatio = bounds.h > 0 ? bounds.w / bounds.h : 1;
 
-    // Center sampling for color
+    // Amostragem central
     const centerW = Math.floor(width * 0.4);
     const centerH = Math.floor(height * 0.4);
     const startX = Math.floor((width - centerW) / 2);
@@ -266,8 +328,10 @@ class VisionProcessor {
     const cropCanvas = document.createElement('canvas');
     const cropCtx = cropCanvas.getContext('2d');
     
-    const isSmall = (bounds.w * bounds.h) < (fullWidth * fullHeight * 0.2);
-    const scale = isSmall ? 2.5 : 1.2;
+    // Lógica de Upscale baseada no tamanho relativo
+    // Se for muito pequeno, aumentamos mais para tentar ajudar o OCR (embora milagres não ocorram)
+    const isSmall = (bounds.w * bounds.h) < (fullWidth * fullHeight * 0.15);
+    const scale = isSmall ? 3.0 : 1.5;
 
     cropCanvas.width = bounds.w * scale;
     cropCanvas.height = bounds.h * scale;
@@ -281,9 +345,9 @@ class VisionProcessor {
       
       const normalUrl = cropCanvas.toDataURL('image/jpeg', 0.9);
       const invertedUrl = this.createInvertedImage(cropCtx, cropCanvas.width, cropCanvas.height);
-      return { normalUrl, invertedUrl };
+      return { normalUrl, invertedUrl, finalWidth: cropCanvas.width };
     }
-    return { normalUrl: '', invertedUrl: '' };
+    return { normalUrl: '', invertedUrl: '', finalWidth: 0 };
   }
 
   private applyOcrFilters(ctx: CanvasRenderingContext2D, w: number, h: number) {
@@ -291,7 +355,7 @@ class VisionProcessor {
     const data = imageData.data;
     const output = new Uint8ClampedArray(data);
 
-    // Sharpening
+    // Sharpening agressivo para letras
     for (let y = 1; y < h - 1; y++) {
       for (let x = 1; x < w - 1; x++) {
         const idx = (y * w + x) * 4;
@@ -305,10 +369,11 @@ class VisionProcessor {
       }
     }
 
-    // Binarization
+    // Binarization Adaptativa
     for (let i = 0; i < output.length; i += 4) {
       const gray = output[i] * 0.299 + output[i + 1] * 0.587 + output[i + 2] * 0.114;
-      const val = gray > 150 ? 255 : 0; 
+      // Threshold ajustado para 160 para pegar letras desbotadas em fundo branco
+      const val = gray > 160 ? 255 : 0; 
       data[i] = data[i+1] = data[i+2] = val;
     }
     ctx.putImageData(imageData, 0, 0);
@@ -351,16 +416,23 @@ class VisionProcessor {
 
   private isSkyPixel(r: number, g: number, b: number): boolean {
     const [h, s, l] = this.rgbToHsl(r, g, b);
+    // Azul céu ou Branco estourado (nuvem/sol)
     const isBlueHue = (h > 170 && h < 270);
-    if (isBlueHue && s > 0.2 && l > 0.4) return true;
-    if (l > 0.98 && s < 0.05) return true; 
+    
+    // Céu azul
+    if (isBlueHue && s > 0.15 && l > 0.3) return true;
+    
+    // Céu branco/cinza (muito claro e sem saturação)
+    // Cuidado para não remover etiquetas brancas. Etiquetas geralmente tem texto (bordas)
+    // Céu é liso. Mas aqui verificamos pixel a pixel.
+    if (l > 0.95 && s < 0.1) return true; 
+    
     return false;
   }
 }
 
 // =============================================================================
 // CLASSE 2: OCR DISPATCHER (SINGLETON)
-// Gerencia threads do Tesseract
 // =============================================================================
 class OCRDispatcher {
   private static instance: OCRDispatcher;
@@ -380,7 +452,6 @@ class OCRDispatcher {
   public async getScheduler(): Promise<Tesseract.Scheduler> {
     if (this.scheduler) return this.scheduler;
     if (this.isInitializing) {
-        // Simple polling wait if initializing
         while(this.isInitializing) {
             await new Promise(r => setTimeout(r, 100));
         }
@@ -411,10 +482,8 @@ class OCRDispatcher {
 
 // =============================================================================
 // CLASSE 3: KNOWLEDGE REPOSITORY
-// Gerencia dados de modelos, potências e lógica de matching
 // =============================================================================
 class KnowledgeRepository {
-  // Base de conhecimento estática (Tabelas)
   private readonly MODEL_VALID_POWERS: Record<string, number[]> = {
     'PALLAS': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
     'KINGSUN': [23, 33, 47, 60, 75, 90, 110, 130, 155, 200],
@@ -477,7 +546,6 @@ class KnowledgeRepository {
     'BULBO': [35]
   };
 
-  // Algoritmo de Distância Levenshtein
   private levenshtein(a: string, b: string): number {
     const matrix = [];
     for (let i = 0; i <= b.length; i++) matrix[i] = [i];
@@ -580,7 +648,28 @@ class KnowledgeRepository {
       }
     }
 
-    // Backup por Assinatura
+    // --- NOVA LÓGICA: Detecção Conjunta (Modelo + Potência) ---
+    // Procura padrões como "URBJET 150W" ou "VOLTANA 80"
+    if (model) {
+        // Regex que busca o Modelo seguido de algo, seguido de número
+        // Ex: "URBJET LED 150"
+        const combinedRegex = new RegExp(`${model}[^0-9]{0,10}(\\d{2,3})`, 'i');
+        const combinedMatch = cleanText.match(combinedRegex);
+        
+        if (combinedMatch && combinedMatch[1]) {
+            const rawVal = parseInt(combinedMatch[1], 10);
+            if (this.isValidPower(rawVal)) {
+                // Valida na tabela
+                const validSet = this.MODEL_VALID_POWERS[model];
+                if (!validSet || validSet.includes(rawVal)) {
+                    power = rawVal;
+                    reasoningParts.push(`Padrão "Modelo + Valor" (${model} ${power})`);
+                }
+            }
+        }
+    }
+
+    // Backup por Assinatura de Erro
     if (!model) {
       for (const example of trainingData) {
         if (example.ocrSignature && cleanText.includes(example.ocrSignature)) {
@@ -592,24 +681,27 @@ class KnowledgeRepository {
       }
     }
 
-    // Detecção de Potência
-    const explicitPowerRegex = /\b(\d{2,3})\s?(W|WATTS)\b/g;
-    const explicitMatches = [...cleanText.matchAll(explicitPowerRegex)];
-    const explicitPowers = explicitMatches.map(m => parseInt(m[1], 10));
+    // Detecção de Potência Isolada (Se a conjunta falhou)
+    if (!power) {
+        // Busca explicita "150W", "80 WATTS"
+        const explicitPowerRegex = /\b(\d{2,3})\s?(W|WATTS)\b/g;
+        const explicitMatches = [...cleanText.matchAll(explicitPowerRegex)];
+        const explicitPowers = explicitMatches.map(m => parseInt(m[1], 10));
 
-    if (explicitPowers.length > 0) {
-       const validExplicit = explicitPowers.filter(p => p > 10 && p < 500 && p !== 220 && p !== 127 && p !== 110);
-       if (validExplicit.length > 0) {
-           power = Math.max(...validExplicit);
-           reasoningParts.push(`Potência Explícita: ${power}W`);
-       }
+        if (explicitPowers.length > 0) {
+            const validExplicit = explicitPowers.filter(p => this.isValidPower(p));
+            if (validExplicit.length > 0) {
+                power = Math.max(...validExplicit);
+                reasoningParts.push(`Potência Explícita: ${power}W`);
+            }
+        }
     }
 
     if (!power) {
         const looseNumberRegex = /\b(\d{2,3})\b/g;
         const looseMatches = [...cleanText.matchAll(looseNumberRegex)];
         const potentialPowers = looseMatches.map(m => parseInt(m[1], 10))
-           .filter(p => ![110, 127, 220, 380, 2023, 2024, 2025].includes(p));
+           .filter(p => this.isValidPower(p));
 
         if (model && this.MODEL_VALID_POWERS[model]) {
             const validSet = this.MODEL_VALID_POWERS[model];
@@ -628,6 +720,7 @@ class KnowledgeRepository {
         }
     }
     
+    // Regra dos dígitos pequenos (06 -> 60W)
     if (!power) {
         const smallNumRegex = /\b0([1-9])\b/g;
         const smallMatch = smallNumRegex.exec(cleanText);
@@ -650,11 +743,15 @@ class KnowledgeRepository {
       reasoning: reasoningParts.length > 0 ? reasoningParts.join(". ") : "Dados insuficientes"
     };
   }
+
+  private isValidPower(p: number): boolean {
+    // Filtra valores que parecem voltagem ou anos
+    return p > 10 && p < 500 && ![110, 127, 220, 380, 2023, 2024, 2025].includes(p);
+  }
 }
 
 // =============================================================================
 // CLASSE 4: LUMINAIRE SERVICE (FACADE)
-// Interface principal para a aplicação
 // =============================================================================
 export class LuminaireService {
   private vision: VisionProcessor;
@@ -689,8 +786,21 @@ export class LuminaireService {
   }
 
   public async analyze(base64Image: string, trainingData: TrainingExample[]): Promise<AnalysisResponse & { processedPreview?: string }> {
-    // 1. Visão Computacional
+    // 1. Visão Computacional (Pré-processamento e Validação)
     const prep = await this.vision.preprocess(base64Image);
+
+    // CRITICAL: Se a visão computacional rejeitar (cena ampla ou muito longe), retorna erro imediatamente.
+    if (!prep.validation.isValid) {
+        return {
+            model: null,
+            rawText: "",
+            calculatedPower: null,
+            confidence: 0,
+            reasoning: `Ignorado: ${prep.validation.reason}`,
+            features: prep.features,
+            processedPreview: prep.processedPreview
+        };
+    }
 
     // 2. Busca na Memória Visual (Match Imediato)
     const { match: visualMatch, diff: visualDiff } = this.knowledge.findVisualMatch(prep.features, trainingData);
@@ -723,7 +833,7 @@ export class LuminaireService {
 
       await Promise.all([p1, p2]);
 
-      // Fallback para imagem completa se necessário
+      // Fallback para imagem completa apenas se o texto for curto (mas não se for cena ampla)
       if (combinedText.length < 10 || !combinedText.match(/\d/)) {
           const resFull = await scheduler.addJob('recognize', prep.fullResizedUrl);
           combinedText += ` \n ${(resFull as any).data.text}`;
@@ -740,7 +850,7 @@ export class LuminaireService {
     } catch (error) {
       console.error("OCR Falhou", error);
       localResult = {
-        model: null, rawText: prep.isFallback ? "Erro/Distante" : "Erro OCR", calculatedPower: null, confidence: 0, reasoning: "Falha processamento"
+        model: null, rawText: "Erro OCR", calculatedPower: null, confidence: 0, reasoning: "Falha processamento"
       };
       if (visualMatch && visualDiff < 0.20) {
           localResult.model = visualMatch.model;
