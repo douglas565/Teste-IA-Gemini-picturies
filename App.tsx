@@ -181,9 +181,13 @@ const App: React.FC = () => {
   
   // Fila de Processamento por JOB (Pasta)
   const [queue, setQueue] = useState<ProcessingJob[]>([]);
-  const [isProcessingQueue, setIsProcessingQueue] = useState(false);
+  // Controle de concorrência
+  const [activeJobsCount, setActiveJobsCount] = useState(0);
   const [processedCount, setProcessedCount] = useState(0);
+  const [totalEnqueued, setTotalEnqueued] = useState(0);
   
+  const MAX_CONCURRENT_JOBS = 2; // Processa 2 pastas ao mesmo tempo (cada uma usa X threads de OCR)
+
   // Correction Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [itemToEdit, setItemToEdit] = useState<DetectionResult | null>(null);
@@ -200,73 +204,77 @@ const App: React.FC = () => {
   const CONFIDENCE_THRESHOLD = 0.85;
 
   // --- PERSISTÊNCIA ROBUSTA ---
-  // Salva sempre que houver alteração, sem condições de tamanho, garantindo sincronia.
   useEffect(() => {
     localStorage.setItem('lumiscan_training_data', JSON.stringify(trainingData));
   }, [trainingData]);
 
-  // --- PROCESSAMENTO DE FILA (LOTE) ---
+  // --- PROCESSAMENTO DE FILA CONCORRENTE ---
   useEffect(() => {
-    const processNext = async () => {
-      if (queue.length === 0 || isProcessingQueue) return;
+    const launchJobs = async () => {
+      // Se não há nada na fila ou já estamos no máximo de capacidade, sai
+      if (queue.length === 0 || activeJobsCount >= MAX_CONCURRENT_JOBS) return;
 
-      setIsProcessingQueue(true);
-      const job = queue[0];
+      // Pega os próximos N jobs que cabem no "slot" de processamento
+      const slotsAvailable = MAX_CONCURRENT_JOBS - activeJobsCount;
+      const jobsToStart = queue.slice(0, slotsAvailable);
       
-      try {
-        await processJob(job);
-      } catch (error) {
-        console.error("Erro ao processar job da fila:", job.id, error);
-      } finally {
-        setQueue(prev => prev.slice(1));
-        setProcessedCount(prev => prev + 1);
-        setIsProcessingQueue(false);
-      }
+      // Remove da fila imediatamente para não serem pegos novamente
+      setQueue(prev => prev.slice(jobsToStart.length));
+      setActiveJobsCount(prev => prev + jobsToStart.length);
+
+      // Inicia cada job sem esperar um pelo outro (fire and forget no loop, await no worker)
+      jobsToStart.forEach(job => {
+          processJob(job).finally(() => {
+             setActiveJobsCount(prev => prev - 1);
+             setProcessedCount(prev => prev + 1);
+          });
+      });
     };
 
-    if (queue.length > 0) {
-      processNext();
-    }
-  }, [queue, isProcessingQueue]);
+    launchJobs();
+  }, [queue, activeJobsCount]);
 
   const processJob = async (job: ProcessingJob) => {
-    // 1. Seleciona a melhor imagem do lote
-    // Se o job tiver apenas 1 arquivo (modo unitário), retorna ele mesmo imediatamente
-    const bestFile = await selectBestImageFromBatch(job.files);
+    try {
+      // 1. Seleciona a melhor imagem do lote
+      const bestFile = await selectBestImageFromBatch(job.files);
 
-    return new Promise<void>((resolve) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(bestFile);
-      reader.onload = async () => {
-        const base64String = reader.result as string;
-        const base64Data = base64String.split(',')[1];
+      await new Promise<void>((resolve) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(bestFile);
+        reader.onload = async () => {
+          const base64String = reader.result as string;
+          const base64Data = base64String.split(',')[1];
 
-        // O analyzeLuminaireImage agora cruza memória visual com OCR
-        const analysisResponse = await analyzeLuminaireImage(base64Data, trainingData);
+          // O analyzeLuminaireImage usa o Scheduler (Pool de Threads)
+          const analysisResponse = await analyzeLuminaireImage(base64Data, trainingData);
 
-        const isLowConfidence = analysisResponse.confidence < CONFIDENCE_THRESHOLD;
-        const isMissingData = !analysisResponse.calculatedPower || !analysisResponse.model;
+          const isLowConfidence = analysisResponse.confidence < CONFIDENCE_THRESHOLD;
+          const isMissingData = !analysisResponse.calculatedPower || !analysisResponse.model;
 
-        const newResult: DetectionResult = {
-          id: Date.now().toString() + Math.random().toString().slice(2, 6),
-          pointId: job.id, // Nome da pasta ou Nome do Arquivo (se unitário)
-          fileName: bestFile.name, 
-          timestamp: Date.now(),
-          imageUrl: base64String,
-          model: analysisResponse.model,
-          power: analysisResponse.calculatedPower,
-          confidence: analysisResponse.confidence,
-          reasoning: analysisResponse.reasoning,
-          rawText: analysisResponse.rawText,
-          features: analysisResponse.features, // Guarda features para aprendizado futuro
-          status: (isLowConfidence || isMissingData) ? 'pending_review' : 'auto_detected'
+          const newResult: DetectionResult = {
+            id: Date.now().toString() + Math.random().toString().slice(2, 6),
+            pointId: job.id, // Nome da pasta ou Nome do Arquivo (se unitário)
+            fileName: bestFile.name, 
+            timestamp: Date.now(),
+            imageUrl: base64String,
+            model: analysisResponse.model,
+            power: analysisResponse.calculatedPower,
+            confidence: analysisResponse.confidence,
+            reasoning: analysisResponse.reasoning,
+            rawText: analysisResponse.rawText,
+            features: analysisResponse.features, // Guarda features para aprendizado futuro
+            status: (isLowConfidence || isMissingData) ? 'pending_review' : 'auto_detected'
+          };
+
+          setHistory(prev => [newResult, ...prev]);
+          resolve();
         };
-
-        setHistory(prev => [newResult, ...prev]);
-        resolve();
-      };
-      reader.onerror = () => resolve();
-    });
+        reader.onerror = () => resolve();
+      });
+    } catch (error) {
+       console.error("Erro fatal no job", job.id, error);
+    }
   };
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -277,7 +285,6 @@ const App: React.FC = () => {
     
     Array.from(files).forEach((file: File) => {
       // webkitRelativePath formato: "PastaPai/Arquivo.jpg"
-      // Se tiver caminho relativo, é um upload de pasta.
       const path = (file as any).webkitRelativePath || "";
       const parts = path.split('/');
       
@@ -288,7 +295,6 @@ const App: React.FC = () => {
         groupId = parts[parts.length - 2];
       } else {
         // MODO ARQUIVO UNITÁRIO: Cada arquivo é um job independente.
-        // Usamos o nome do arquivo como "ID" para que ele seja processado individualmente.
         groupId = file.name;
       }
       
@@ -298,14 +304,19 @@ const App: React.FC = () => {
       groups[groupId].push(file);
     });
 
-    // Converter grupos em Jobs
     const newJobs: ProcessingJob[] = Object.keys(groups).map(id => ({
       id,
       files: groups[id]
     }));
 
+    if (queue.length === 0 && activeJobsCount === 0) {
+        setProcessedCount(0);
+        setTotalEnqueued(newJobs.length);
+    } else {
+        setTotalEnqueued(prev => prev + newJobs.length);
+    }
+
     setQueue(prev => [...prev, ...newJobs]);
-    if (queue.length === 0) setProcessedCount(0);
     
     // Limpar inputs
     if (folderInputRef.current) folderInputRef.current.value = '';
@@ -348,8 +359,7 @@ const App: React.FC = () => {
         };
       }
       
-      // Rechecagem inteligente: Se o item ainda não foi confirmado ou tem baixa confiança,
-      // verifica se ele "casa" com o novo padrão que acabamos de aprender.
+      // Rechecagem inteligente
       if (item.status !== 'confirmed' && checkRetrospectiveMatch(item, newExample)) {
           return {
               ...item,
@@ -376,7 +386,6 @@ const App: React.FC = () => {
   const clearMemory = () => {
     if(confirm("Tem certeza que deseja apagar todo o aprendizado?")) {
       setTrainingData([]);
-      // localStorage será atualizado automaticamente pelo useEffect
     }
   };
 
@@ -440,7 +449,6 @@ const App: React.FC = () => {
       (item.confidence * 100).toFixed(0) + "%"
     ]);
 
-    // Usando ; como separador para compatibilidade com Excel em PT-BR e BOM para UTF-8
     const csvContent = "\uFEFF" + [headers.join(";"), ...rows.map(e => e.join(";"))].join("\n");
     
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
@@ -453,7 +461,7 @@ const App: React.FC = () => {
     document.body.removeChild(link);
   };
 
-  const isWorking = queue.length > 0 || isProcessingQueue;
+  const isWorking = queue.length > 0 || activeJobsCount > 0;
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row">
@@ -466,7 +474,7 @@ const App: React.FC = () => {
            </div>
            <div>
              <h1 className="text-xl font-bold tracking-tight leading-none">LumiScan</h1>
-             <span className="text-[10px] text-green-400 font-mono">AUTO LEARNING</span>
+             <span className="text-[10px] text-green-400 font-mono">MULTI-CORE ENGINE</span>
            </div>
         </div>
 
@@ -474,8 +482,8 @@ const App: React.FC = () => {
           {isWorking && (
             <div className="bg-indigo-900/50 p-4 rounded-lg border border-indigo-500/30 animate-pulse">
               <h3 className="text-xs uppercase text-indigo-300 font-bold mb-1">Processando Lote</h3>
-              <div className="text-2xl font-bold text-white">{processedCount} / {processedCount + queue.length}</div>
-              <p className="text-xs text-indigo-400">Pontos na fila...</p>
+              <div className="text-2xl font-bold text-white">{processedCount} / {totalEnqueued}</div>
+              <p className="text-xs text-indigo-400">Utilizando Múltiplos Núcleos...</p>
             </div>
           )}
 
@@ -531,9 +539,9 @@ const App: React.FC = () => {
       <main className="flex-1 md:ml-64 p-4 md:p-8 overflow-y-auto">
         <div className="max-w-6xl mx-auto mb-8">
            <div className="bg-white rounded-2xl shadow-lg border border-indigo-50 p-6 md:p-8 text-center relative overflow-hidden">
-              <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Reconhecimento Inteligente</h2>
+              <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">Reconhecimento Otimizado</h2>
               <p className="text-slate-500 mb-8 max-w-xl mx-auto relative z-10 text-sm md:text-base">
-                Escolha o método de análise. Use "Selecionar Pasta" para pontos com múltiplas fotos (escolha automática da melhor) ou "Selecionar Fotos" para arquivos soltos.
+                Motor de OCR paralelizado ativo. O sistema utilizará todos os núcleos disponíveis para processar imagens simultaneamente.
               </p>
 
               <div className="flex flex-col md:flex-row gap-4 justify-center relative z-10 w-full px-4">
@@ -630,7 +638,7 @@ const App: React.FC = () => {
                     </svg>
                   </div>
                   <h3 className="text-slate-900 font-medium mb-1">Aguardando Imagens</h3>
-                  <p className="text-slate-500 text-sm max-w-xs mx-auto">Carregue pastas de imagens. O sistema agrupa por ponto e escolhe a melhor foto.</p>
+                  <p className="text-slate-500 text-sm max-w-xs mx-auto">Carregue pastas de imagens. O sistema utiliza aceleração multi-core para processamento rápido.</p>
                </div>
 
                {/* Catálogo */}

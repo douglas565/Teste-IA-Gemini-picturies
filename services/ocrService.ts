@@ -2,6 +2,40 @@
 import Tesseract from 'tesseract.js';
 import { AnalysisResponse, TrainingExample, VisualFeatures, DetectionResult } from "../types";
 
+// --- CONFIGURAÇÃO DE MULTITHREADING ---
+const MAX_WORKERS = Math.min(navigator.hardwareConcurrency || 4, 4); // Usa até 4 núcleos ou o máx disponível
+let scheduler: Tesseract.Scheduler | null = null;
+let isSchedulerInitializing = false;
+
+// Inicializa o Pool de Workers (Executa uma vez)
+const initWorkerPool = async () => {
+  if (scheduler || isSchedulerInitializing) return scheduler;
+  
+  isSchedulerInitializing = true;
+  console.log(`Iniciando Pool de OCR com ${MAX_WORKERS} threads...`);
+  
+  const tempScheduler = Tesseract.createScheduler();
+  
+  const workerGen = async () => {
+    const worker = await Tesseract.createWorker('eng');
+    await worker.setParameters({
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:Ww',
+      tessedit_pageseg_mode: '6' as any, // Assume bloco de texto uniforme
+    });
+    return worker;
+  };
+
+  // Cria workers em paralelo
+  const workerPromises = Array(MAX_WORKERS).fill(0).map(() => workerGen());
+  const workers = await Promise.all(workerPromises);
+  
+  workers.forEach(w => tempScheduler.addWorker(w));
+  
+  scheduler = tempScheduler;
+  isSchedulerInitializing = false;
+  return scheduler;
+};
+
 // --- TABELAS DE REFERÊNCIA (STRICT) ---
 const MODEL_VALID_POWERS: Record<string, number[]> = {
   // Base Existente
@@ -675,32 +709,33 @@ export const analyzeLuminaireImage = async (
       };
   }
 
-  // --- ESTRATÉGIA HÍBRIDA DE OCR ---
+  // --- ESTRATÉGIA HÍBRIDA DE OCR PARALELIZADA ---
   try {
-    const worker = await Tesseract.createWorker('eng');
-    await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-. /:Ww',
-      tessedit_pageseg_mode: '6' as any, // Assume uniform text block
-    });
+    // Garante que o pool de threads esteja pronto
+    const workerScheduler = await initWorkerPool();
+    if (!workerScheduler) throw new Error("Falha ao inicializar sistema de threads");
 
     let combinedText = "";
 
-    // 1. Tenta OCR no Crop (Normal)
-    const resNormal = await worker.recognize(normalUrl);
-    combinedText += ` ${resNormal.data.text}`;
+    // Executa Jobs no Scheduler (Automaticamente distribuído entre os workers)
+    // 1. OCR no Crop (Normal)
+    const p1 = workerScheduler.addJob('recognize', normalUrl)
+        .then((res: any) => { combinedText += ` ${res.data.text}`; });
+    
+    // 2. OCR no Crop (Invertido) - em paralelo com o 1 se houver workers livres
+    const p2 = workerScheduler.addJob('recognize', invertedUrl)
+        .then((res: any) => { combinedText += ` ${res.data.text}`; });
 
-    // 2. Tenta OCR no Crop (Invertido) - ajuda com texto branco em fundo escuro
-    const resInverted = await worker.recognize(invertedUrl);
-    combinedText += ` ${resInverted.data.text}`;
+    await Promise.all([p1, p2]);
 
-    // 3. SE a confiança for baixa ou texto curto, tenta na imagem COMPLETA (Segurança contra Crop ruim)
+    // 3. SE a confiança for baixa ou texto curto, tenta na imagem COMPLETA (Segurança)
+    // Nota: Rodamos sequencial a isso para não ocupar workers à toa se não precisar
     if (combinedText.length < 10 || !combinedText.match(/\d/)) {
-         await worker.setParameters({ tessedit_pageseg_mode: '3' as any }); // Auto segmentation for full image
-         const resFull = await worker.recognize(fullResizedUrl);
-         combinedText += ` \n ${resFull.data.text}`;
+        // Tesseract.js scheduler não suporta mudar setParameters per job facilmente sem afetar o worker state
+        // Então enviamos o job full com o estado padrão
+        const resFull = await workerScheduler.addJob('recognize', fullResizedUrl);
+        combinedText += ` \n ${(resFull as any).data.text}`;
     }
-
-    await worker.terminate();
 
     const processedOcr = processExtractedText(combinedText, features, trainingData);
     
