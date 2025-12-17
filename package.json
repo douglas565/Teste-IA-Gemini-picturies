@@ -1,43 +1,56 @@
+
 {
   "name": "lumiscan-offline",
+  "productName": "LumiScan AI",
   "version": "1.0.0",
-  "description": "Sistema de reconhecimento de luminárias offline",
-  "author": "Douglas Ramos",
-  "private": true,
-  "main": "electron/main.js",
-  "type": "module", 
+  "description": "Sistema de reconhecimento de luminárias offline.",
+  "main": "electron.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "build:exe": "npm run build && electron-builder --win --x64"
+    "electron:dev": "concurrently \"vite\" \"wait-on tcp:5173 && electron .\"",
+    "build:exe": "tsc && vite build && electron-builder"
   },
+  "keywords": [
+    "ocr",
+    "electron",
+    "offline",
+    "recognition"
+  ],
+  "author": "LumiScan",
+  "license": "MIT",
   "dependencies": {
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "tesseract.js": "5",
-    "@google/genai": "^1.30.0"
+    "@google/genai": "^0.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tesseract.js": "^5.0.0"
   },
   "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "concurrently": "^8.0.0",
     "electron": "^28.0.0",
     "electron-builder": "^24.9.0",
-    "@types/node": "^22.14.0",
-    "@vitejs/plugin-react": "^5.0.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0",
+    "wait-on": "^7.2.0"
   },
   "build": {
-    "appId": "com.douglas.lumiscan",
-    "productName": "LumiScan AI",
+    "appId": "com.lumiscan.offline",
+    "productName": "LumiScan Offline",
+    "files": [
+      "dist/**/*",
+      "electron.js"
+    ],
     "directories": {
       "output": "release"
     },
-    "files": [
-      "dist/**/*",
-      "electron/**/*"
-    ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "public/icon.ico"
     }
   }
 }

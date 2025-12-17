@@ -1,3 +1,5 @@
+
+
 import React from 'react';
 
 export interface VisualFeatures {
@@ -21,6 +23,8 @@ export interface DetectionResult {
   rawText?: string;
   features?: VisualFeatures; // Memória visual da imagem
   status: 'confirmed' | 'pending_review' | 'auto_detected';
+  aiProvider?: 'local_heuristic' | 'ollama' | 'user_corrected';
+  processedPreview?: string;
 }
 
 export interface TrainingExample {
@@ -38,6 +42,8 @@ export interface AnalysisResponse {
   confidence: number;
   reasoning: string;
   features?: VisualFeatures;
+  aiProvider?: 'local_heuristic' | 'ollama' | 'user_corrected';
+  processedPreview?: string;
 }
 
 export interface GeminiResponse {
@@ -46,6 +52,12 @@ export interface GeminiResponse {
   calculatedPower: number | null;
   confidence: number;
   reasoning: string;
+}
+
+export interface OllamaConfig {
+  enabled: boolean;
+  model: string; // ex: 'llava', 'llama3.2-vision'
+  host: string;  // ex: 'http://localhost:11434'
 }
 
 // Fix for JSX Intrinsic Elements missing in some environments
