@@ -1,5 +1,4 @@
 
-
 import Tesseract from 'tesseract.js';
 import { AnalysisResponse, TrainingExample, VisualFeatures, DetectionResult, OllamaConfig } from "../types";
 import { OllamaService } from './ollamaService';
@@ -18,14 +17,13 @@ interface PreprocessResult {
 }
 
 // =============================================================================
-// CLASSE 1: VISION PROCESSOR
+// CLASSE 1: VISION PROCESSOR (Filtro Base de Pixels)
 // =============================================================================
 class VisionProcessor {
   private static readonly DETECT_CONFIG = {
-    MAX_WIDTH: 2000,
-    // Reduzi a exigência de tamanho mínimo. Antes estava rejeitando fotos boas mas um pouco distantes.
-    MIN_BLOB_PERCENT: 0.02, 
-    MAX_VERTICAL_ASPECT: 3.0 
+    MAX_WIDTH: 1500, // Reduzi um pouco para acelerar envio para IA
+    MIN_BLOB_PERCENT: 0.01, 
+    MAX_VERTICAL_ASPECT: 3.5 
   };
 
   public async preprocess(base64Image: string): Promise<PreprocessResult> {
@@ -44,14 +42,12 @@ class VisionProcessor {
         canvas.height = height;
         ctx.drawImage(img, 0, 0, width, height);
 
-        const fullResizedUrl = canvas.toDataURL('image/jpeg', 0.8);
+        const fullResizedUrl = canvas.toDataURL('image/jpeg', 0.85);
         const fullImageData = ctx.getImageData(0, 0, width, height);
         
-        // 1. Detecção Inteligente de Objeto
+        // 1. Detecção Inteligente de Objeto (Matemática)
         const detection = this.detectObjectBounds(fullImageData.data, width, height);
         
-        // Se a detecção heurística falhar muito feio, a gente ainda deixa passar
-        // para o Ollama tentar salvar, a menos que seja puramente ruído.
         if (detection.isSceneNoise) {
             resolve({
                 normalUrl: base64Image,
@@ -59,7 +55,7 @@ class VisionProcessor {
                 fullResizedUrl: fullResizedUrl,
                 features: { aspectRatio: 1, edgeDensity: 0, hue: 0, saturation: 0, brightness: 0 },
                 processedPreview: fullResizedUrl,
-                validation: { isValid: false, reason: "Apenas cenário (céu/rua) detectado." }
+                validation: { isValid: false, reason: "Apenas cenário (céu/rua) detectado via Pixels." }
             });
             return;
         }
@@ -72,17 +68,17 @@ class VisionProcessor {
         let isValid = true;
         let reason = "OK";
         
-        if (finalWidth < 150) {
+        if (finalWidth < 120) {
              isValid = false; 
-             reason = "Muito Distante";
+             reason = "Muito Distante (Resolução)";
         }
 
         resolve({
           normalUrl,
           invertedUrl,
-          fullResizedUrl: fullResizedUrl, // Imagem original redimensionada (contexto para IA)
+          fullResizedUrl: fullResizedUrl, // Imagem para a IA
           features,
-          processedPreview: normalUrl, // Crop processado (para OCR)
+          processedPreview: normalUrl, // Crop processado para o OCR
           validation: { isValid, reason }
         });
       };
@@ -216,7 +212,7 @@ class VisionProcessor {
 
     const validBlobs = blobs.filter(b => {
       if (b.area < (minPixelCount / (scanStep * scanStep))) return false;
-      if (b.maxY > height * 0.99) return false; // Toca o chão
+      // Removido filtro estrito de chão para deixar a IA decidir se é poste ou não depois
       return true;
     });
 
@@ -633,24 +629,43 @@ export class LuminaireService {
   }
 
   public async analyze(base64Image: string, trainingData: TrainingExample[]): Promise<AnalysisResponse> {
-    // 1. Visão Computacional
+    const ollamaService = new OllamaService(this.ollamaConfig.host, this.ollamaConfig.model);
+    
+    // 1. Visão Computacional (Pixels)
     const prep = await this.vision.preprocess(base64Image);
     
-    // Se a validação heurística falhou FEIO, mas temos Ollama, damos uma chance para o Ollama
-    // a menos que seja puramente "ruído de cena".
-    if (!prep.validation.isValid && !this.ollamaConfig.enabled) {
+    if (!prep.validation.isValid) {
         return {
             model: null,
             rawText: "",
             calculatedPower: null,
             confidence: 0,
-            reasoning: `Ignorado: ${prep.validation.reason}`,
+            reasoning: `Ignorado (Pixels): ${prep.validation.reason}`,
             features: prep.features,
             processedPreview: prep.processedPreview
         };
     }
 
-    // 2. Busca Match Visual Exato (Cache)
+    // 2. CHECK OLLAMA "PRE-OCR" (Se ativado)
+    // Verifica se a imagem é realmente uma luminária VISÍVEL antes de tentar ler texto.
+    if (this.ollamaConfig.enabled) {
+      // Usa a imagem fullResized (contexto visual maior) para decidir se é poste inteiro ou close-up
+      const check = await ollamaService.checkImageViability(prep.fullResizedUrl.split(',')[1]);
+      if (!check.valid) {
+         return {
+            model: null,
+            rawText: "",
+            calculatedPower: null,
+            confidence: 0,
+            reasoning: `Ignorado (AI Vision): ${check.reason}`,
+            features: prep.features,
+            processedPreview: prep.processedPreview,
+            aiProvider: 'ollama'
+        };
+      }
+    }
+
+    // 3. Busca Match Visual Exato (Cache Local)
     const { match: visualMatch, diff: visualDiff } = this.knowledge.findVisualMatch(prep.features, trainingData);
     if (visualMatch && visualDiff < 0.05) {
         return {
@@ -665,7 +680,7 @@ export class LuminaireService {
         };
     }
 
-    // 3. OCR Tradicional (Heurístico)
+    // 4. OCR Tradicional (Heurístico)
     let heuristicResult: AnalysisResponse = {
         model: null, rawText: "", calculatedPower: null, confidence: 0, reasoning: "", aiProvider: 'local_heuristic'
     };
@@ -682,48 +697,45 @@ export class LuminaireService {
         console.error("Erro OCR", e);
     }
 
-    // 4. Inteligência Artificial (Ollama)
-    // Usamos Ollama se:
-    // a) Está ativado
-    // b) O método heurístico não tem certeza absoluta (confiança < 0.9) OU o usuário quer validação sempre
+    // 5. ANÁLISE OLLAMA "POST-OCR" (Recheck e Validação)
+    // Se ativado, usa a IA para validar o texto lido pelo OCR e corrigir alucinações.
     let ollamaResult: AnalysisResponse | null = null;
     
     if (this.ollamaConfig.enabled) {
-        const ollamaService = new OllamaService(this.ollamaConfig.host, this.ollamaConfig.model);
-        // Enviamos a imagem "fullResized" que tem mais contexto visual para a IA,
-        // mas também passamos o texto que o OCR conseguiu ler para ajudar.
+        // Envia o texto do OCR e o histórico para a IA fazer o "tira-teima"
         ollamaResult = await ollamaService.analyzeImage(
-            prep.fullResizedUrl.split(',')[1], // Base64 limpo
+            prep.fullResizedUrl.split(',')[1],
             heuristicResult.rawText,
             trainingData
         );
     }
 
-    // 5. Consenso / Decisão Final
+    // 6. Fusão / Decisão Final
     let finalResult = heuristicResult;
     finalResult.features = prep.features;
     finalResult.processedPreview = prep.processedPreview;
 
     if (ollamaResult) {
-        // Se Ollama identificou algo e a heurística não, usamos Ollama
-        if (ollamaResult.model && !heuristicResult.model) {
-            finalResult = { ...heuristicResult, ...ollamaResult };
-            finalResult.confidence = 0.85; // Alta confiança na IA
+        // A IA tem prioridade na decisão do Modelo (pois entende o contexto visual)
+        if (ollamaResult.model) {
+             finalResult.model = ollamaResult.model;
+             finalResult.confidence = 0.90;
+             finalResult.reasoning = `IA + OCR: ${ollamaResult.reasoning}`;
         }
-        // Se ambos identificaram, mas diferentes, IA ganha (geralmente mais esperta com contexto)
-        else if (ollamaResult.model && heuristicResult.model && ollamaResult.model !== heuristicResult.model) {
-             finalResult = { ...heuristicResult, ...ollamaResult };
-             finalResult.reasoning = `IA (${this.ollamaConfig.model}) substituiu detecção heurística: ${ollamaResult.reasoning}`;
-        }
-        // Se heurística falhou em potência, usamos IA
-        else if (!finalResult.calculatedPower && ollamaResult.calculatedPower) {
+        
+        // A IA ajuda na potência se o OCR falhou
+        if (ollamaResult.calculatedPower) {
              finalResult.calculatedPower = ollamaResult.calculatedPower;
-             finalResult.reasoning += ` | Potência via IA: ${ollamaResult.reasoning}`;
+        }
+
+        // Se a IA disse que NÃO é um modelo válido (null), respeitamos
+        if (ollamaResult.model === null && heuristicResult.model === null) {
+             finalResult.reasoning = ollamaResult.reasoning;
         }
     }
 
-    // Se ainda assim estiver fraco, aplicamos a fusão visual antiga como último recurso
-    if (finalResult.confidence < 0.8) {
+    // Fallback visual se tudo falhar
+    if (finalResult.confidence < 0.8 && !finalResult.model) {
         this.applyVisualFusion(finalResult, visualMatch, visualDiff);
     }
 
