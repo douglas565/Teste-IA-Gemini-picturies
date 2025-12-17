@@ -1,8 +1,11 @@
 {
   "name": "lumiscan-offline",
   "version": "1.0.0",
-  "main": "electron/main.js", 
-  "type": "module",
+  "description": "Sistema de reconhecimento de luminárias offline",
+  "author": "Douglas Ramos",
+  "private": true,
+  "main": "electron/main.js",
+  "type": "module", 
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -34,8 +37,7 @@
       "electron/**/*"
     ],
     "win": {
-      "target": "nsis",
-      "icon": "public/icon.ico" 
+      "target": "nsis"
     }
   }
 }
