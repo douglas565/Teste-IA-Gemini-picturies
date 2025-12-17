@@ -22,39 +22,41 @@ export class OllamaService {
   /**
    * STEP 1: Verificação Rápida (Pre-OCR)
    * Verifica se a imagem é adequada (close-up) ou se é lixo (poste inteiro, rua, escuro).
-   * Otimizado para ser rápido (max_tokens baixo).
+   * Otimizado para ser rápido, mas com timeout seguro para hardware local.
    */
   public async checkImageViability(base64Image: string): Promise<{ valid: boolean; reason: string }> {
     const prompt = `
-    TASK: Classify this image for technical analysis.
+    TASK: Industrial Inspection Filter.
     
-    Is this image a CLOSE-UP view of a specific street light fixture (luminaire head) or its label?
+    IS THIS IMAGE A CLOSE-UP OF A LUMINAIRE HEAD?
     
-    Answer NO if:
-    - It shows a whole street pole from distance.
-    - It shows a general street view.
-    - The object is too far away or tiny.
-    - It is completely dark or blurry.
+    CRITERIA FOR "NO" (INVALID):
+    - Image shows a COMPLETE STREET POLE (post) from top to bottom.
+    - Image is a wide street scene (cars, road visible).
+    - The luminaire is a tiny dot in the sky.
+    - Image is pitch black or completely blurry.
     
-    Answer YES only if:
-    - The luminaire head fills significant part of the frame.
-    - OR a label/sticker is visible.
+    CRITERIA FOR "YES" (VALID):
+    - The image is Zoomed In on the lamp fixture.
+    - We can clearly see the shape of the luminaire head.
+    - Or we can see a label/sticker.
 
     RESPONSE FORMAT JSON ONLY:
-    {"valid": boolean, "reason": "short explanation"}
+    {"valid": boolean, "reason": "Reason for decision"}
     `;
 
     try {
-      const response = await this.callOllama(prompt, base64Image, 100); // 100 tokens max para rapidez
-      if (!response) return { valid: true, reason: "Ollama offline, skipping check" };
+      // 60s timeout para garantir que rodar em CPU não quebre na primeira carga
+      const response = await this.callOllama(prompt, base64Image, 100, 60000); 
+      if (!response) return { valid: true, reason: "Ollama silent, proceeding safely" };
       
       return {
         valid: response.valid === true,
-        reason: response.reason || "AI Decision"
+        reason: response.reason || "AI Filter Decision"
       };
     } catch (e) {
       console.warn("AI Viability Check Failed", e);
-      return { valid: true, reason: "Check skipped due to error" }; // Em caso de erro, deixa passar
+      return { valid: true, reason: "Check skipped due to error" };
     }
   }
 
@@ -68,47 +70,44 @@ export class OllamaService {
     trainingData: TrainingExample[]
   ): Promise<AnalysisResponse | null> {
     
-    // Resume o conhecimento prévio para poupar tokens, focando nos modelos existentes
-    const distinctModels = Array.from(new Set(trainingData.map(t => `${t.model} (${t.power}W)`))).slice(0, 15).join(', ');
+    // Resume o conhecimento prévio
+    const distinctModels = Array.from(new Set(trainingData.map(t => `${t.model} (${t.power}W)`))).slice(0, 20).join(', ');
     
     const prompt = `
-    ROLE: Expert Industrial Inspector.
+    ROLE: Local AI Assistant for Street Lighting Inventory.
     
-    INPUT DATA:
-    1. RAW OCR TEXT DETECTED: "${ocrText}" (May contain typos like '06' instead of '60', 'S0N' instead of 'SON').
-    2. VISUAL IMAGE: Provided.
-    3. KNOWN MODELS DATABASE: [${distinctModels}]
+    CONTEXT - USER KNOWLEDGE BASE (PREVIOUSLY LEARNED ITEMS):
+    [${distinctModels}]
+    
+    INPUT:
+    - RAW OCR TEXT: "${ocrText}"
+    - IMAGE: Provided.
 
     TASK:
-    Analyze the image to identify the Luminaire Model and Power (Watts).
+    1. VALIDATE: Does the OCR text match the visual image? 
+    2. CORRECT: If OCR says "VOLT ANA" and Knowledge Base has "VOLTANA", correct it.
+    3. SEARCH: Look for numbers indicating Watts (W).
+       - Rule: "06" = 60W, "15" = 150W (if high pressure sodium look).
+       - Rule: "LED" labels usually show direct watts like "100W".
     
-    RULES:
-    1. CROSS-CHECK: Compare the OCR text with what you visually see. If OCR says "150" but the label clearly says "100", trust the image.
-    2. CORRECTION: If OCR has noise (e.g. "V0LTANA"), fix it ("VOLTANA") based on the Known Models Database.
-    3. POWER RULES: 
-       - If you see "06", it usually means 60W code.
-       - If you see "08" or "09", it means 80W or 90W.
-       - "15" usually means 150W if it's a big lamp.
-    4. REJECTION: If the image is not a luminaire, set model to null.
-
     OUTPUT JSON ONLY:
     {
-      "model": "NAME (UPPERCASE)",
-      "power": NUMBER (Integer Watts),
-      "reasoning": "Explain how you used OCR text + Visuals to decide."
+      "model": "NAME (UPPERCASE) or NULL",
+      "power": NUMBER (Integer Watts) or NULL,
+      "reasoning": "Short explanation referencing Visuals + OCR + Knowledge Base"
     }
     `;
 
     try {
-      const parsed = await this.callOllama(prompt, base64Image, 300);
+      const parsed = await this.callOllama(prompt, base64Image, 300, 60000);
       if (!parsed) return null;
 
       return {
         model: parsed.model === "NAME" || parsed.model === "NULL" ? null : parsed.model?.toUpperCase(),
         calculatedPower: typeof parsed.power === 'number' ? parsed.power : null,
-        confidence: 0.95, 
+        confidence: 0.90, // Confiança alta pois passou pelo filtro duplo
         rawText: ocrText,
-        reasoning: parsed.reasoning || "AI Analysis",
+        reasoning: parsed.reasoning || "AI Analysis Local",
         aiProvider: 'ollama'
       };
     } catch (error) {
@@ -118,9 +117,9 @@ export class OllamaService {
   }
 
   // Helper privado para chamadas
-  private async callOllama(prompt: string, imageBase64: string, numPredict: number): Promise<any> {
+  private async callOllama(prompt: string, imageBase64: string, numPredict: number, timeoutMs: number = 40000): Promise<any> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000); // 20s timeout
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(`${this.host}/api/generate`, {
@@ -133,8 +132,9 @@ export class OllamaService {
           stream: false,
           format: "json",
           options: {
-            temperature: 0.1, // Muito determinístico
-            num_predict: numPredict
+            temperature: 0.1, // Extremo determinismo para consistência
+            num_predict: numPredict,
+            num_ctx: 2048 // Garante contexto suficiente para a lista de modelos
           }
         }),
         signal: controller.signal
@@ -143,8 +143,16 @@ export class OllamaService {
 
       if (!response.ok) throw new Error("Ollama Error");
       const data = await response.json();
-      return JSON.parse(data.response);
+      
+      // Limpeza básica caso o modelo retorne markdown ```json ... ```
+      let cleanJson = data.response.trim();
+      if (cleanJson.startsWith('```json')) {
+        cleanJson = cleanJson.replace(/```json/g, '').replace(/```/g, '');
+      }
+      
+      return JSON.parse(cleanJson);
     } catch (e) {
+      console.warn("Ollama Call Error", e);
       return null;
     }
   }

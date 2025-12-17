@@ -7,45 +7,14 @@ import CorrectionModal from './components/CorrectionModal';
 import ImageZoomModal from './components/ImageZoomModal';
 import { OllamaService } from './services/ollamaService';
 
-// --- DADOS DO CATÁLOGO DE REFERÊNCIA (PDF) ---
-const CATALOG_DATA = [
-  // VIÁRIAS
-  { model: 'SCHRÉDER VOLTANA', powers: [39, 56, 60, 75, 80, 110, 145, 212], color: 'bg-blue-800', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">SCH</div> },
-  { model: 'SCHRÉDER AKILA', powers: [155, 236], color: 'bg-blue-800', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">AKL</div> },
-  { model: 'BRIGHTLUX URBJET', powers: [40, 65, 130, 150, 213, 230], color: 'bg-cyan-700', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">BRT</div> },
-  { model: 'ALPER IP BR', powers: [40, 130, 200, 210], color: 'bg-slate-700', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">ALP</div> },
-  { model: 'REEME LD-3P', powers: [51, 65, 82, 130, 290], color: 'bg-gray-600', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">REE</div> },
-  { model: 'LEDSTAR SL VITTA', powers: [58, 120, 200, 215], color: 'bg-indigo-600', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">LED</div> },
-  { model: 'PHILIPS BRP372', powers: [127], color: 'bg-blue-900', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">PHI</div> },
-  { model: 'IBILUX ÉVORA', powers: [120], color: 'bg-emerald-700', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">IBI</div> },
-  { model: 'ILUMATIC ARES', powers: [60, 100], color: 'bg-red-800', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">ILU</div> },
-  { model: 'ORION CRONOS/NENA', powers: [57, 100], color: 'bg-orange-700', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">ORI</div> },
-  { model: 'ALUDAX AL10LM', powers: [60], color: 'bg-teal-700', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">ALU</div> },
-  { model: 'GOLDEN SQUARE', powers: [75, 80], color: 'bg-yellow-600', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">GLD</div> },
-  { model: 'ARGOS AR7', powers: [30, 62, 120], color: 'bg-purple-700', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">ARG</div> },
-  { model: 'ARCOBRAS ECOLED', powers: [66, 120], color: 'bg-green-800', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">ARC</div> },
-  { model: 'UNILUMIN LEDOLPHIN', powers: [120], color: 'bg-sky-600', category: 'VIÁRIA', icon: <div className="text-white font-bold text-xs">UNI</div> },
-  { model: 'EMPALUX RL', powers: [100, 150], color: 'bg-zinc-800', category: 'PROJETOR', icon: <div className="text-white font-bold text-xs">EMP</div> },
-  { model: 'ALPER LIPBR', powers: [90, 130, 200], color: 'bg-slate-700', category: 'PROJETOR', icon: <div className="text-white font-bold text-xs">ALP</div> },
-  { model: 'TECNOWATT BORA/MERAK', powers: [54, 60], color: 'bg-pink-800', category: 'DECORATIVA', icon: <div className="text-white font-bold text-xs">TEC</div> },
-  { model: 'SCHRÉDER ISLA', powers: [36, 51], color: 'bg-blue-800', category: 'DECORATIVA', icon: <div className="text-white font-bold text-xs">SCH</div> },
-  { model: 'ORION VEGA', powers: [40, 55, 60], color: 'bg-orange-700', category: 'DECORATIVA', icon: <div className="text-white font-bold text-xs">ORI</div> },
-  { model: 'SONERES FOSTERI', powers: [54], color: 'bg-lime-700', category: 'DECORATIVA', icon: <div className="text-white font-bold text-xs">SON</div> },
-];
-
-interface ProcessingJob {
-  id: string; // Ponto ID (Nome da Pasta)
-  files: File[];
-}
-
 const App: React.FC = () => {
   const [history, setHistory] = useState<DetectionResult[]>([]);
   const luminaireService = useMemo(() => new LuminaireService(), []);
 
-  // Ollama Config State
+  // Ollama Config State - Habilitado por padrão para App Local
   const [ollamaConfig, setOllamaConfig] = useState<OllamaConfig>({
-    enabled: false,
-    model: 'llava', // Default vision model
+    enabled: true,
+    model: 'llava', 
     host: 'http://localhost:11434'
   });
   const [ollamaStatus, setOllamaStatus] = useState<'checking' | 'online' | 'offline'>('checking');
@@ -58,12 +27,13 @@ const App: React.FC = () => {
     } catch (e) { return []; }
   });
   
-  const [queue, setQueue] = useState<ProcessingJob[]>([]);
+  const [queue, setQueue] = useState<{id: string, files: File[]}[]>([]);
   const [activeJobsCount, setActiveJobsCount] = useState(0);
   const [processedCount, setProcessedCount] = useState(0);
   const [totalEnqueued, setTotalEnqueued] = useState(0);
   
-  const MAX_CONCURRENT_JOBS = 1; // Reduzido para 1 se estiver usando IA para não travar o PC
+  // Limita concorrência para não travar PC do usuário rodando LLM Local
+  const MAX_CONCURRENT_JOBS = 1; 
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [itemToEdit, setItemToEdit] = useState<DetectionResult | null>(null);
@@ -71,7 +41,6 @@ const App: React.FC = () => {
 
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const jsonInputRef = useRef<HTMLInputElement>(null);
 
   // --- OLLAMA CHECK ---
   useEffect(() => {
@@ -82,7 +51,7 @@ const App: React.FC = () => {
       setOllamaStatus(isOnline ? 'online' : 'offline');
     };
     checkOllama();
-    const interval = setInterval(checkOllama, 10000); // Check every 10s
+    const interval = setInterval(checkOllama, 30000); // Check a cada 30s
     return () => clearInterval(interval);
   }, [ollamaConfig.host]);
 
@@ -116,7 +85,7 @@ const App: React.FC = () => {
     launchJobs();
   }, [queue, activeJobsCount, luminaireService]);
 
-  const processJob = async (job: ProcessingJob) => {
+  const processJob = async (job: {id: string, files: File[]}) => {
     try {
       const bestFile = await luminaireService.selectBestImage(job.files);
 
@@ -144,7 +113,8 @@ const App: React.FC = () => {
             rawText: analysisResponse.rawText,
             features: analysisResponse.features,
             aiProvider: analysisResponse.aiProvider as any,
-            status: (isLowConfidence || isMissingData) ? 'pending_review' : 'auto_detected'
+            status: (isLowConfidence || isMissingData) ? 'pending_review' : 'auto_detected',
+            processedPreview: analysisResponse.processedPreview
           };
 
           setHistory(prev => [newResult, ...prev]);
@@ -168,7 +138,7 @@ const App: React.FC = () => {
       if (!groups[groupId]) groups[groupId] = [];
       groups[groupId].push(file);
     });
-    const newJobs: ProcessingJob[] = Object.keys(groups).map(id => ({ id, files: groups[id] }));
+    const newJobs = Object.keys(groups).map(id => ({ id, files: groups[id] }));
     if (queue.length === 0 && activeJobsCount === 0) {
         setProcessedCount(0);
         setTotalEnqueued(newJobs.length);
@@ -222,61 +192,65 @@ const App: React.FC = () => {
     setItemToEdit(null);
   };
 
-  const clearMemory = () => { if(confirm("Apagar tudo?")) setTrainingData([]); };
-  const exportMemory = () => { /* Mesma lógica anterior */ };
-  const triggerImport = () => { if (jsonInputRef.current) jsonInputRef.current.click(); };
-  const handleImportMemory = (event: React.ChangeEvent<HTMLInputElement>) => { /* Mesma lógica anterior */ };
-  const exportToExcel = () => { /* Mesma lógica anterior */ };
-
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row">
-      <aside className="w-full md:w-64 bg-slate-900 text-white p-6 flex flex-col md:fixed md:h-full z-10">
+      <aside className="w-full md:w-64 bg-slate-900 text-white p-6 flex flex-col md:fixed md:h-full z-10 shadow-2xl">
         <div className="flex items-center gap-3 mb-8">
-           <div className="w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/30">
+           <div className="w-10 h-10 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/50 ring-1 ring-white/10">
              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
              </svg>
            </div>
            <div>
-             <h1 className="text-xl font-bold tracking-tight leading-none">LumiScan</h1>
-             <span className="text-[10px] text-green-400 font-mono">OFFLINE AI</span>
+             <h1 className="text-xl font-bold tracking-tight leading-none text-white">LumiScan</h1>
+             <span className="text-[10px] text-green-400 font-mono tracking-widest uppercase">App Desktop</span>
            </div>
         </div>
 
-        <div className="space-y-6 flex-1 overflow-y-auto">
+        <div className="space-y-6 flex-1 overflow-y-auto pr-2 custom-scrollbar">
           {/* AI CONFIG SECTION */}
-          <div className="bg-slate-800 p-4 rounded-lg border border-slate-700">
-             <h3 className="text-xs uppercase text-slate-400 font-bold mb-3 flex justify-between items-center">
-                AI Local (Ollama)
-                <span className={`w-2 h-2 rounded-full ${ollamaStatus === 'online' ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></span>
-             </h3>
+          <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50 backdrop-blur-sm">
+             <div className="flex justify-between items-center mb-3">
+               <h3 className="text-xs uppercase text-slate-400 font-bold tracking-wider">
+                  IA Local (Ollama)
+               </h3>
+               <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                 ollamaStatus === 'online' ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 
+                 ollamaStatus === 'checking' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-red-500/20 text-red-400'
+               }`}>
+                 <span className={`w-1.5 h-1.5 rounded-full ${ollamaStatus === 'online' ? 'bg-green-500 animate-pulse' : ollamaStatus === 'checking' ? 'bg-yellow-500' : 'bg-red-500'}`}></span>
+                 {ollamaStatus === 'online' ? 'ONLINE' : ollamaStatus === 'checking' ? 'BUSCANDO...' : 'OFFLINE'}
+               </div>
+             </div>
              
              <div className="space-y-3">
-               <label className="flex items-center gap-2 cursor-pointer">
-                 <input 
-                   type="checkbox" 
-                   checked={ollamaConfig.enabled}
-                   onChange={e => setOllamaConfig(prev => ({ ...prev, enabled: e.target.checked }))}
-                   className="rounded bg-slate-700 border-slate-600 text-indigo-500 focus:ring-offset-slate-800"
-                 />
-                 <span className="text-sm">Ativar Visão IA</span>
+               <label className="flex items-center gap-3 cursor-pointer group">
+                 <div className="relative">
+                   <input 
+                     type="checkbox" 
+                     checked={ollamaConfig.enabled}
+                     onChange={e => setOllamaConfig(prev => ({ ...prev, enabled: e.target.checked }))}
+                     className="sr-only peer"
+                   />
+                   <div className="w-9 h-5 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                 </div>
+                 <span className="text-sm font-medium text-slate-300 group-hover:text-white transition-colors">Ativar Visão IA</span>
                </label>
                
                {ollamaConfig.enabled && (
-                 <div>
-                   <label className="text-[10px] text-slate-500 block mb-1">Modelo (Vision obrigatório)</label>
+                 <div className="animate-fadeIn">
+                   <label className="text-[10px] text-slate-500 block mb-1 uppercase font-semibold">Modelo Vision</label>
                    <input 
                      type="text" 
                      value={ollamaConfig.model}
                      onChange={e => setOllamaConfig(prev => ({ ...prev, model: e.target.value }))}
-                     className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white placeholder-slate-600"
+                     className="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 focus:ring-1 focus:ring-indigo-500 outline-none transition-all"
                      placeholder="ex: llava"
                    />
                    {ollamaStatus === 'offline' && (
-                     <p className="text-[10px] text-red-400 mt-1">Ollama não detectado em {ollamaConfig.host}</p>
-                   )}
-                   {ollamaStatus === 'online' && (
-                     <p className="text-[10px] text-green-400 mt-1">Conectado ao Ollama</p>
+                     <div className="mt-2 p-2 bg-red-900/20 border border-red-900/30 rounded text-[10px] text-red-300 leading-tight">
+                       Certifique-se que o Ollama está rodando (ollama run llava)
+                     </div>
                    )}
                  </div>
                )}
@@ -284,50 +258,112 @@ const App: React.FC = () => {
           </div>
 
           <div>
-            <h3 className="text-xs uppercase tracking-wider text-slate-400 font-semibold mb-2">Memória Neural</h3>
-            <div className="bg-slate-800 rounded-lg p-4 border border-slate-700 relative overflow-hidden">
+            <h3 className="text-xs uppercase tracking-wider text-slate-400 font-semibold mb-2 flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
+              </svg>
+              Base de Conhecimento
+            </h3>
+            <div className="bg-slate-800 rounded-xl p-4 border border-slate-700 relative overflow-hidden group hover:border-indigo-500/50 transition-colors">
+               <div className="absolute right-0 top-0 p-3 opacity-10 group-hover:opacity-20 transition-opacity">
+                 <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 text-indigo-500" viewBox="0 0 20 20" fill="currentColor">
+                   <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
+                 </svg>
+               </div>
                <div className="text-3xl font-bold text-white mb-1 relative z-10">{trainingData.length}</div>
-               <p className="text-xs text-slate-400 relative z-10">Padrões Aprendidos</p>
+               <p className="text-xs text-slate-400 relative z-10">Modelos Aprendidos</p>
+               {trainingData.length > 0 && (
+                 <button onClick={() => {if(confirm('Limpar memória?')) setTrainingData([])}} className="mt-3 text-[10px] text-red-400 hover:text-red-300 underline relative z-10">
+                   Resetar Memória
+                 </button>
+               )}
             </div>
           </div>
+        </div>
+        
+        <div className="pt-4 border-t border-slate-800 text-[10px] text-slate-500 text-center">
+          LumiScan v1.0 • Offline App
         </div>
       </aside>
 
       <main className="flex-1 md:ml-64 p-4 md:p-8 overflow-y-auto">
         <div className="max-w-6xl mx-auto mb-8">
-           <div className="bg-white rounded-2xl shadow-lg border border-indigo-50 p-6 md:p-8 text-center relative overflow-hidden">
+           <div className="bg-white rounded-2xl shadow-xl shadow-slate-200/50 border border-slate-100 p-6 md:p-8 text-center relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500"></div>
+              
               <h2 className="text-2xl md:text-3xl font-bold text-slate-900 mb-2 relative z-10">
-                 {ollamaConfig.enabled && ollamaStatus === 'online' ? 'Reconhecimento Híbrido (AI + OCR)' : 'Reconhecimento Padrão'}
+                 Painel de Processamento
               </h2>
               <p className="text-slate-500 mb-8 max-w-xl mx-auto relative z-10 text-sm md:text-base">
-                {ollamaConfig.enabled && ollamaStatus === 'online' 
-                  ? 'Utilizando Rede Neural Vision (Ollama) para detectar padrões complexos.'
-                  : 'Para melhorar a detecção, instale o Ollama e ative a Visão IA no menu lateral.'}
+                {ollamaStatus === 'online' && ollamaConfig.enabled
+                  ? 'IA Local Conectada. O sistema verificará automaticamente cada imagem contra sua base de conhecimento.'
+                  : 'Modo Básico. Ative o Ollama no menu lateral para habilitar verificação inteligente e correção automática.'}
               </p>
 
-              <div className="flex flex-col md:flex-row gap-4 justify-center relative z-10 w-full px-4">
+              <div className="flex flex-col md:flex-row gap-4 justify-center relative z-10 w-full px-4 max-w-2xl mx-auto">
                 <input type="file" ref={folderInputRef} 
                   // @ts-ignore
                   webkitdirectory="" directory="" multiple onChange={handleFileUpload} className="hidden" />
-                <button onClick={() => folderInputRef.current?.click()} className="flex-1 max-w-sm flex items-center justify-center gap-3 px-6 py-4 bg-slate-900 text-white rounded-xl hover:bg-indigo-600 shadow-xl shadow-indigo-900/20">
-                    <span className="font-bold text-sm">Selecionar Pasta</span>
+                <button 
+                  onClick={() => folderInputRef.current?.click()} 
+                  className="group flex-1 flex items-center justify-center gap-3 px-6 py-4 bg-slate-900 text-white rounded-xl hover:bg-indigo-600 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl shadow-slate-900/20"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-slate-400 group-hover:text-white transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                    </svg>
+                    <div className="text-left">
+                      <span className="block font-bold text-sm">Selecionar Pasta</span>
+                      <span className="block text-[10px] text-slate-400 group-hover:text-indigo-200">Processar lote completo</span>
+                    </div>
                 </button>
 
                 <input type="file" ref={fileInputRef} multiple accept="image/*" onChange={handleFileUpload} className="hidden" />
-                <button onClick={() => fileInputRef.current?.click()} className="flex-1 max-w-sm flex items-center justify-center gap-3 px-6 py-4 bg-white text-slate-900 border border-slate-200 rounded-xl hover:bg-slate-50 shadow-sm">
-                    <span className="font-bold text-sm">Selecionar Fotos</span>
+                <button 
+                  onClick={() => fileInputRef.current?.click()} 
+                  className="group flex-1 flex items-center justify-center gap-3 px-6 py-4 bg-white text-slate-900 border border-slate-200 rounded-xl hover:border-indigo-500 hover:bg-indigo-50 hover:text-indigo-700 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-sm"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-slate-400 group-hover:text-indigo-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                    <div className="text-left">
+                      <span className="block font-bold text-sm">Selecionar Arquivos</span>
+                      <span className="block text-[10px] text-slate-400 group-hover:text-indigo-500">Imagens individuais</span>
+                    </div>
                 </button>
               </div>
            </div>
+           
+           {/* Progress Bar se houver jobs */}
+           {totalEnqueued > 0 && processedCount < totalEnqueued && (
+             <div className="mt-4 bg-white rounded-xl p-4 shadow-sm border border-slate-100 flex items-center gap-4">
+                <div className="flex-1">
+                   <div className="flex justify-between mb-1">
+                     <span className="text-xs font-bold text-slate-700">Processando...</span>
+                     <span className="text-xs text-slate-500">{processedCount} / {totalEnqueued}</span>
+                   </div>
+                   <div className="w-full bg-slate-100 rounded-full h-2">
+                      <div className="bg-indigo-500 h-2 rounded-full transition-all duration-300" style={{ width: `${(processedCount / totalEnqueued) * 100}%` }}></div>
+                   </div>
+                </div>
+                {activeJobsCount > 0 && (
+                   <svg className="animate-spin h-5 w-5 text-indigo-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                   </svg>
+                )}
+             </div>
+           )}
         </div>
 
         <div className="max-w-6xl mx-auto">
           {history.length > 0 && (
             <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
               <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                Resultados
+                Resultados Recentes
               </h3>
-              <button onClick={() => setHistory([])} className="text-xs text-red-500 hover:underline">Limpar Tudo</button>
+              <button onClick={() => setHistory([])} className="text-xs font-medium text-slate-500 hover:text-red-500 px-3 py-1 bg-white border border-slate-200 rounded-md hover:bg-red-50 transition-colors">
+                Limpar Lista
+              </button>
             </div>
           )}
 
