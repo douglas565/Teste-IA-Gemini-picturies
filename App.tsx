@@ -1,6 +1,6 @@
 
-import React, { useState, useRef, useEffect } from 'react';
-import { analyzeLuminaireImage, checkRetrospectiveMatch, selectBestImageFromBatch } from './services/ocrService';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { LuminaireService } from './services/ocrService';
 import { DetectionResult, TrainingExample } from './types';
 import ResultCard from './components/ResultCard';
 import CorrectionModal from './components/CorrectionModal';
@@ -168,6 +168,9 @@ interface ProcessingJob {
 const App: React.FC = () => {
   const [history, setHistory] = useState<DetectionResult[]>([]);
   
+  // Instancia o Serviço Principal (Singleton scope para o App)
+  const luminaireService = useMemo(() => new LuminaireService(), []);
+
   // Inicialização Preguiçosa para garantir carregamento síncrono do localStorage
   const [trainingData, setTrainingData] = useState<TrainingExample[]>(() => {
     try {
@@ -232,12 +235,12 @@ const App: React.FC = () => {
     };
 
     launchJobs();
-  }, [queue, activeJobsCount]);
+  }, [queue, activeJobsCount, luminaireService]); // Adicionado luminaireService como dependência
 
   const processJob = async (job: ProcessingJob) => {
     try {
-      // 1. Seleciona a melhor imagem do lote
-      const bestFile = await selectBestImageFromBatch(job.files);
+      // 1. Seleciona a melhor imagem do lote usando o Service
+      const bestFile = await luminaireService.selectBestImage(job.files);
 
       await new Promise<void>((resolve) => {
         const reader = new FileReader();
@@ -246,8 +249,8 @@ const App: React.FC = () => {
           const base64String = reader.result as string;
           const base64Data = base64String.split(',')[1];
 
-          // O analyzeLuminaireImage usa o Scheduler (Pool de Threads)
-          const analysisResponse = await analyzeLuminaireImage(base64Data, trainingData);
+          // Chama o Service principal para análise
+          const analysisResponse = await luminaireService.analyze(base64Data, trainingData);
 
           const isLowConfidence = analysisResponse.confidence < CONFIDENCE_THRESHOLD;
           const isMissingData = !analysisResponse.calculatedPower || !analysisResponse.model;
@@ -359,8 +362,8 @@ const App: React.FC = () => {
         };
       }
       
-      // Rechecagem inteligente
-      if (item.status !== 'confirmed' && checkRetrospectiveMatch(item, newExample)) {
+      // Rechecagem inteligente usando o Service
+      if (item.status !== 'confirmed' && luminaireService.checkRetrospectiveMatch(item, newExample)) {
           return {
               ...item,
               model: correctedModel.toUpperCase(),
