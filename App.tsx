@@ -41,6 +41,7 @@ const App: React.FC = () => {
 
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const jsonInputRef = useRef<HTMLInputElement>(null);
 
   // --- OLLAMA CHECK ---
   useEffect(() => {
@@ -95,6 +96,7 @@ const App: React.FC = () => {
         reader.onload = async () => {
           const base64String = reader.result as string;
           const base64Data = base64String.split(',')[1];
+          // AQUI A MÁGICA ACONTECE: trainingData (importado ou aprendido) é passado para a IA
           const analysisResponse = await luminaireService.analyze(base64Data, trainingData);
 
           const isLowConfidence = analysisResponse.confidence < 0.85;
@@ -192,6 +194,70 @@ const App: React.FC = () => {
     setItemToEdit(null);
   };
 
+  // --- FUNÇÕES DE EXPORTAÇÃO E IMPORTAÇÃO ---
+
+  const exportHistoryToCSV = () => {
+    if (history.length === 0) return;
+    
+    // Cabeçalho CSV
+    const headers = "Arquivo/ID,Modelo,Potencia (W),Confianca (%),Status,Raciocinio\n";
+    
+    // Linhas
+    const rows = history.map(item => {
+      const fileName = item.fileName || item.pointId || "Sem Nome";
+      const model = item.model || "N/A";
+      const power = item.power || "";
+      const confidence = (item.confidence * 100).toFixed(0);
+      const status = item.status;
+      const reasoning = item.reasoning.replace(/,/g, ' '); // Remove vírgulas para não quebrar CSV
+
+      return `${fileName},${model},${power},${confidence},${status},${reasoning}`;
+    }).join("\n");
+
+    const blob = new Blob([headers + rows], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `lumiscan_export_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const exportTrainingMemory = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(trainingData, null, 2));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "lumiscan_memory.json");
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+  };
+
+  const handleImportMemory = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const importedData = JSON.parse(e.target?.result as string);
+        if (Array.isArray(importedData)) {
+          // Mescla com dados existentes ou substitui, aqui estamos adicionando aos existentes
+          // Filtrando duplicatas simples por modelo+potência pode ser feito se desejado
+          setTrainingData(prev => [...prev, ...importedData]);
+          alert(`Sucesso! ${importedData.length} padrões carregados para a IA.`);
+        } else {
+          alert("Formato JSON inválido. Esperava-se um array.");
+        }
+      } catch (err) {
+        alert("Erro ao ler arquivo JSON.");
+      }
+    };
+    reader.readAsText(file);
+    if (jsonInputRef.current) jsonInputRef.current.value = '';
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col md:flex-row">
       <aside className="w-full md:w-64 bg-slate-900 text-white p-6 flex flex-col md:fixed md:h-full z-10 shadow-2xl">
@@ -271,13 +337,56 @@ const App: React.FC = () => {
                  </svg>
                </div>
                <div className="text-3xl font-bold text-white mb-1 relative z-10">{trainingData.length}</div>
-               <p className="text-xs text-slate-400 relative z-10">Modelos Aprendidos</p>
+               <p className="text-xs text-slate-400 relative z-10">Padrões Aprendidos</p>
+               
+               <div className="mt-4 grid grid-cols-2 gap-2 relative z-10">
+                 <input type="file" ref={jsonInputRef} accept=".json" onChange={handleImportMemory} className="hidden" />
+                 <button 
+                    onClick={() => jsonInputRef.current?.click()}
+                    className="bg-slate-700 hover:bg-slate-600 text-white text-[10px] py-2 px-2 rounded border border-slate-600 flex flex-col items-center justify-center gap-1 transition-colors"
+                 >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    Carregar JSON
+                 </button>
+                 <button 
+                    onClick={exportTrainingMemory}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] py-2 px-2 rounded border border-indigo-500 flex flex-col items-center justify-center gap-1 transition-colors"
+                 >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    Salvar JSON
+                 </button>
+               </div>
+               
                {trainingData.length > 0 && (
-                 <button onClick={() => {if(confirm('Limpar memória?')) setTrainingData([])}} className="mt-3 text-[10px] text-red-400 hover:text-red-300 underline relative z-10">
+                 <button onClick={() => {if(confirm('Limpar toda a memória de aprendizado?')) setTrainingData([])}} className="w-full text-center mt-3 text-[10px] text-red-400 hover:text-red-300 underline relative z-10">
                    Resetar Memória
                  </button>
                )}
             </div>
+          </div>
+
+          <div>
+            <h3 className="text-xs uppercase tracking-wider text-slate-400 font-semibold mb-2 flex items-center gap-2">
+               Relatórios
+            </h3>
+            <button 
+              onClick={exportHistoryToCSV}
+              disabled={history.length === 0}
+              className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl border font-bold text-xs transition-all ${
+                history.length === 0 
+                ? 'bg-slate-800 text-slate-600 border-slate-700 cursor-not-allowed' 
+                : 'bg-emerald-600 text-white border-emerald-500 hover:bg-emerald-500 shadow-lg shadow-emerald-900/20'
+              }`}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Exportar Excel (CSV)
+            </button>
           </div>
         </div>
         
